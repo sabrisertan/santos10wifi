@@ -14,6 +14,8 @@ This is a **source preview**, for developers with this exact device. It preserve
 the working port and its integration changes. A fresh-device installer and a
 redistributable root filesystem are not included. Other Tab 3 models are untested.
 
+<img width="1280" height="800" alt="Screenshot From 2026-09-28 11-17-23" src="https://github.com/user-attachments/assets/570a2ca8-cf9d-41b9-a049-98bc398b3072" />
+
 ## What works
 
 | Component | Recorded state |
