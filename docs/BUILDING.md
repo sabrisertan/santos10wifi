@@ -1,5 +1,8 @@
 # Building and reconstructing sources
 
+Start with [REPRODUCING.md](../REPRODUCING.md) for the verified scope, exact
+source preparation sequence and the remaining whole-system gaps.
+
 Use Linux, Python 3.12+ (tar extraction filters), Git, GNU make, a compiler with
 x86 32-bit kernel support, binutils, flex, bison, bc, OpenSSL development files
 and libelf development files. Userspace requires a separate Void i686 build
@@ -17,7 +20,7 @@ JOBS=4 tools/build-kernel.sh work/linux-santos out/kernel
 ```
 
 The helper rejects a dirty or wrong upstream HEAD and an existing destination.
-The build creates `arch/x86/boot/bzImage`, `vdx/*.ko` and `pvr/*.ko` under the output
+The build creates `arch/x86/boot/bzImage`, `sync-core/santos-sync-core.ko`, `vdx/*.ko` and `pvr/*.ko` under the output
 directory. Its release suffix is `-santos-preview`, deliberately identifying a
 new candidate. The four running baseline modules are `santos_pvr112`,
 `santos_sync_core`, `santos_pvr_shell_vdx`, and `santos_vdx`; other compiled

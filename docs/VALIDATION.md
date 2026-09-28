@@ -47,3 +47,26 @@ successful i686 inspection; no write was attempted.
 
 The earlier 299-file validation count belongs to the initial source preview;
 the current `SHA256SUMS` and verifier output cover the added files as well.
+
+## README editing and reproduction follow-up
+
+A README edit revealed that the original all-file checksum policy unnecessarily
+failed normal documentation updates. Markdown now skips checksum matching while
+retaining syntax-independent hygiene/private-data and local-link checks. Code,
+patches, configuration and tools remain hash-checked. The test suite covers both
+accepted documentation edits and rejected source changes/private data/binaries.
+
+Reproduction review also corrected the Linux manifest from the annotated `v7.2`
+tag object to its peeled commit, and included the missing standalone
+`santos-sync-core` source/header and build step. Public Linux/GTK tag references
+were checked. Linux source preparation passed from a clean checkout of the pinned
+commit using the local upstream object mirror; all 99 patched files and the
+provider overlay matched the source used for the build. The complete build helper
+passed in a new output directory, including the fence core. Updated output hashes
+are in `configs/build-validation.json`; these binaries have not been booted.
+
+The eleven offline tests pass locally, including annotated-tag checkout handling
+and documentation/source-policy regressions. See [REPRODUCING.md](../REPRODUCING.md)
+for the remaining full-desktop and device-installation gaps. Earlier file counts
+in this record describe their individual snapshots; current inventory comes from
+the source manifest/verifier, which intentionally excludes Markdown hashes.

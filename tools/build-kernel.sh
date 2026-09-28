@@ -11,6 +11,9 @@ out=$(CDPATH= cd -- "$2" && pwd)
 cp "$release/kernel/configs/santos10wifi-highmem.config" "$out/.config"
 make -C "$kernel" O="$out" ARCH=x86 LOCALVERSION=-santos-preview olddefconfig
 make -C "$kernel" O="$out" ARCH=x86 LOCALVERSION=-santos-preview -j"${JOBS:-4}" bzImage modules
+cp -R "$release/modules/santos-sync-core" "$out/sync-core"
+make -C "$kernel" O="$out" ARCH=x86 LOCALVERSION=-santos-preview M="$out/sync-core" \
+ -j"${JOBS:-4}" modules
 cp -R "$release/modules/santos-vdx" "$out/vdx"
 cp -R "$release/kernel/overlay/drivers/gpu/drm/pvrsgx/santos-112" "$out/pvr"
 make -C "$kernel" O="$out" ARCH=x86 LOCALVERSION=-santos-preview M="$out/vdx" \

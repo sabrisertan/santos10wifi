@@ -6,10 +6,12 @@
     {
       "name": "linux",
       "upstream": "https://github.com/torvalds/linux",
-      "base": "237a1c39e8dfd3e1c6f1f023eea37a48ec04cc63",
+      "base": "8d3ae59288f1e7d58d76558a6ee96d533bc5019f",
       "source_head": "92b0083794ca3840cf445dbae2604241c504340d",
       "patch": "patches/linux/0001-santos.patch",
-      "changed_files": 99
+      "changed_files": 99,
+      "upstream_tag_object": "237a1c39e8dfd3e1c6f1f023eea37a48ec04cc63",
+      "note": "base is the peeled v7.2 commit; upstream_tag_object identifies the annotated tag and is not a checkout HEAD."
     },
     {
       "name": "pvr-santos-112",
@@ -50,6 +52,13 @@
       "patch": "patches/gnome-shell/0001-santos.patch",
       "changed_files": 8,
       "upstream_sha256": "2179bab13af353427065096af8bf3d30da7b86e0c516e5ba86a14998af9575f6"
+    },
+    {
+      "name": "santos-sync-core",
+      "path": "modules/santos-sync-core",
+      "note": "Standalone fence core; source/header hashes match the accepted HIGHMEM module build record. Historical comments describe its earlier standalone stage.",
+      "source_sha256": "33eb97b390b1e73bf410bdbe4588a79443fae3573a6506340dd110ce00fca53f",
+      "header_sha256": "792cf4faf4c97d429638bf17c87621e01c4210b37a0a5eb6c25e717bf3fbda56"
     }
   ]
 }

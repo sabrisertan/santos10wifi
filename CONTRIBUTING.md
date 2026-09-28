@@ -12,6 +12,11 @@ Do not attach credentials, private profiles or vendor images to issues. Keep raw
 local evidence outside this public repository. Report regressions with a short
 reproducer, expected/observed behavior and component IDs.
 
-After an intentional release edit, run `python3 tools/update-manifest.py` in a reviewed change
-and run `python3 tools/verify-release.py`. CI checks source-package integrity and
-hygiene; it cannot certify hardware behavior.
+Markdown-only edits (including externally hosted README screenshots) do not require
+updating `SHA256SUMS`. Link and private-data checks still apply to documentation.
+
+After reviewing source, patch, configuration or tool changes, run
+`python3 tools/update-manifest.py`, then `python3 tools/verify-release.py` and
+`python3 -B -m unittest discover -s tests -v`. Commit the regenerated manifest
+with the source change. CI checks source integrity and hygiene; it cannot certify
+hardware behavior. See [REPRODUCING.md](REPRODUCING.md) for the build boundaries.

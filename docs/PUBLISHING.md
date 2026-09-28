@@ -5,7 +5,8 @@ The source preview was published on 2026-09-28. The repository contains source,
 selected integration references and documentation; images and private evidence
 remain outside it.
 
-For intentional updates in a clone:
+For source/configuration/tool updates in a clone (Markdown-only edits may skip
+the manifest update):
 
 ```sh
 python3 tools/update-manifest.py

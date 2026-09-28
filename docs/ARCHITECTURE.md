@@ -18,6 +18,7 @@ components. `SOURCE-MANIFEST.json` records source bases and upstream archive has
 | `patches/linux/` | Platform, boot, input, storage, USB, audio and power delta against upstream Linux 7.2 |
 | `kernel/overlay/` | Current Santos DDK 1.12 provider, including uncommitted fixes; original license headers retained |
 | `kernel/configs/` | Accepted HIGHMEM kernel configuration; no PAE; SGX is built externally |
+| `modules/santos-sync-core/` | Standalone native fence core matching the accepted HIGHMEM source/header hashes |
 | `modules/santos-vdx/` | DRM shell and video engine/MMU source; historical gate sources retained for build completeness |
 | `patches/gtk/` | GTK 4.22.4 SantosGL and application integration changes |
 | `patches/mutter/`, `patches/gnome-shell/` | GNOME 51 source deltas |

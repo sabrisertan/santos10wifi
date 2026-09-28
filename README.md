@@ -34,6 +34,7 @@ repeat every hardware test. See [validation](docs/VALIDATION.md) for that bounda
 
 ## Start here
 
+- [Reproducing the port: verified steps and missing inputs](REPRODUCING.md)
 - [Build and source reconstruction](docs/BUILDING.md)
 - [Known bugs and limitations](docs/KNOWN-ISSUES.md)
 - [Architecture and source map](docs/ARCHITECTURE.md)
