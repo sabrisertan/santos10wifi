@@ -5,12 +5,12 @@ not its parent development workspace. It contains source, selected integration
 references and documentation; images and private evidence remain outside it.
 
 1. Run `python3 tools/verify-release.py` and check `git status --short`.
-2. Create an empty GitHub repository named `santos10wifi-linux` in your account.
+2. Create an empty GitHub repository named `santos10wifi` in the `sabrisertan` account.
    Do not initialize a second README/license in the GitHub creation form.
-3. Substitute your account name below and push the prepared `main` branch:
+3. Use the configured target below to push the prepared `main` branch:
 
 ```sh
-git remote add origin git@github.com:YOUR_ACCOUNT/santos10wifi-linux.git
+git remote add origin git@github.com:sabrisertan/santos10wifi.git
 git push -u origin main
 ```
 

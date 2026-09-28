@@ -3,6 +3,13 @@
 An experimental Linux 7.2 port for **GT-P5210 / santos10wifi**, with a Void Linux
 i686 userspace, GNOME 51, PowerVR SGX544 graphics and MSVDX video decoding.
 
+> **Vibe-coded / LLM-built port.** All project-specific porting and integration
+> work was carried out through LLM coding sessions, including OpenAI Codex.
+> Maintainer [sabrisertan](https://github.com/sabrisertan) reports writing no code
+> by hand: he directed the work, operated the tablet and evaluated the results.
+> This describes the Santos port's development process; Linux, GNOME, Void and
+> the other upstream projects retain their original authorship and licenses.
+
 This is a **source preview**, for developers with this exact device. It preserves
 the working port and its integration changes. A fresh-device installer and a
 redistributable root filesystem are not included. Other Tab 3 models are untested.
@@ -28,7 +35,9 @@ repeat every hardware test. See [validation](docs/VALIDATION.md) for that bounda
 - [Build and source reconstruction](docs/BUILDING.md)
 - [Known bugs and limitations](docs/KNOWN-ISSUES.md)
 - [Architecture and source map](docs/ARCHITECTURE.md)
+- [Bootloader compatibility and partition migration](docs/BOOT-AND-STORAGE.md)
 - [Device recovery and installation boundary](docs/RECOVERY.md)
+- [Installable-image feasibility and remaining work](docs/IMAGE-RELEASE.md)
 - [Security assumptions](SECURITY.md)
 - [Licenses and upstream credits](LICENSE.md)
 

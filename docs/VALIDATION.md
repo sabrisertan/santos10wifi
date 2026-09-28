@@ -30,3 +30,19 @@ was performed. Previous subsystem acceptance is reported with its original scope
 in the known-issues document. Hosted GitHub Actions has not run; its local verifier
 has been exercised. The private-data scan is bounded and is not a comprehensive
 security audit.
+
+## Publication follow-up: boot/storage documentation
+
+The September 28 publication follow-up added the LLM-development attribution,
+boot/partition engineering record and installable-image assessment. The GPT
+inspector passed five offline tests: mixed Samsung/standard headers, differing
+valid arrays, corrupt header/array CRC reporting, excessive array bounds and
+out-of-disk array rejection (the first test covers both header variants).
+It also ran read-only on the i686 tablet: both GPT headers and arrays validate,
+with 21 old primary entries and 18 alternate entries. Disk/partition GUIDs are
+omitted from the public reference. An initial ioctl request used the host's
+64-bit request size and was corrected to the target's `sizeof(size_t)` before
+successful i686 inspection; no write was attempted.
+
+The earlier 299-file validation count belongs to the initial source preview;
+the current `SHA256SUMS` and verifier output cover the added files as well.

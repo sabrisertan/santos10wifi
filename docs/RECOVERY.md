@@ -22,3 +22,7 @@ The publication pass performed read-only SSH inspection and local builds only.
 It did not reboot, flash, modify packages or certify recovery on a new device.
 Do not unload SGX/VDX while DMA, mappings or userspace references may remain active.
 A timed-out DMA wait does not prove that hardware has stopped.
+
+The [boot/storage engineering record](BOOT-AND-STORAGE.md) explains the S-Boot
+handoff, dual-copy PARAM recovery fix and alternate-GPT partition consolidation.
+The [image-release assessment](IMAGE-RELEASE.md) lists the remaining installer work.

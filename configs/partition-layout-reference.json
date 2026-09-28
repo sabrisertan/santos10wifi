@@ -1,0 +1,307 @@
+{
+  "sector_size": 512,
+  "disk_sectors": 30769152,
+  "primary": {
+    "header_lba": 1,
+    "header_size": 512,
+    "current_lba_matches": true,
+    "other_header_lba": 30769151,
+    "header_crc_valid": true,
+    "array_crc_valid": true,
+    "array_crc32": "2843ea38",
+    "entry_capacity": 128,
+    "used_entries": 21,
+    "partitions": [
+      {
+        "number": 1,
+        "name": "RESERVED1",
+        "start_sector": 81920,
+        "sectors": 6144,
+        "within_usable_range": true
+      },
+      {
+        "number": 2,
+        "name": "EFS",
+        "start_sector": 16384,
+        "sectors": 40960,
+        "within_usable_range": true
+      },
+      {
+        "number": 3,
+        "name": "CONFIG",
+        "start_sector": 196608,
+        "sectors": 32768,
+        "within_usable_range": true
+      },
+      {
+        "number": 4,
+        "name": "FACTORY",
+        "start_sector": 229376,
+        "sectors": 4096,
+        "within_usable_range": true
+      },
+      {
+        "number": 5,
+        "name": "MEDIA",
+        "start_sector": 233472,
+        "sectors": 4096,
+        "within_usable_range": true
+      },
+      {
+        "number": 6,
+        "name": "CACHE",
+        "start_sector": 5324800,
+        "sectors": 716800,
+        "within_usable_range": true
+      },
+      {
+        "number": 7,
+        "name": "RESERVED2",
+        "start_sector": 237568,
+        "sectors": 8192,
+        "within_usable_range": true
+      },
+      {
+        "number": 8,
+        "name": "SYSTEM",
+        "start_sector": 286720,
+        "sectors": 4833280,
+        "within_usable_range": true
+      },
+      {
+        "number": 9,
+        "name": "USERDATA",
+        "start_sector": 6041600,
+        "sectors": 24715264,
+        "within_usable_range": true
+      },
+      {
+        "number": 10,
+        "name": "BOOT",
+        "start_sector": 106496,
+        "sectors": 40960,
+        "within_usable_range": true
+      },
+      {
+        "number": 11,
+        "name": "RECOVERY",
+        "start_sector": 147456,
+        "sectors": 40960,
+        "within_usable_range": true
+      },
+      {
+        "number": 12,
+        "name": "RESERVED3",
+        "start_sector": 188416,
+        "sectors": 8192,
+        "within_usable_range": true
+      },
+      {
+        "number": 13,
+        "name": "HIDDEN",
+        "start_sector": 5120000,
+        "sectors": 204800,
+        "within_usable_range": true
+      },
+      {
+        "number": 14,
+        "name": "CARRIER",
+        "start_sector": 245760,
+        "sectors": 8192,
+        "within_usable_range": true
+      },
+      {
+        "number": 15,
+        "name": "TDATA",
+        "start_sector": 253952,
+        "sectors": 8192,
+        "within_usable_range": true
+      },
+      {
+        "number": 16,
+        "name": "PARAM",
+        "start_sector": 73728,
+        "sectors": 8192,
+        "within_usable_range": true
+      },
+      {
+        "number": 17,
+        "name": "PERSDATA",
+        "start_sector": 262144,
+        "sectors": 24576,
+        "within_usable_range": true
+      },
+      {
+        "number": 18,
+        "name": "BOTA0",
+        "start_sector": 8192,
+        "sectors": 4096,
+        "within_usable_range": true
+      },
+      {
+        "number": 19,
+        "name": "BOTA1",
+        "start_sector": 12288,
+        "sectors": 4096,
+        "within_usable_range": true
+      },
+      {
+        "number": 20,
+        "name": "DNX",
+        "start_sector": 88064,
+        "sectors": 2048,
+        "within_usable_range": true
+      },
+      {
+        "number": 21,
+        "name": "OTA",
+        "start_sector": 90112,
+        "sectors": 16384,
+        "within_usable_range": true
+      }
+    ]
+  },
+  "alternate": {
+    "header_lba": 30769151,
+    "header_size": 92,
+    "current_lba_matches": true,
+    "other_header_lba": 1,
+    "header_crc_valid": true,
+    "array_crc_valid": true,
+    "array_crc32": "6455945c",
+    "entry_capacity": 128,
+    "used_entries": 18,
+    "partitions": [
+      {
+        "number": 1,
+        "name": "RESERVED1",
+        "start_sector": 81920,
+        "sectors": 6144,
+        "within_usable_range": true
+      },
+      {
+        "number": 2,
+        "name": "EFS",
+        "start_sector": 16384,
+        "sectors": 40960,
+        "within_usable_range": true
+      },
+      {
+        "number": 3,
+        "name": "CONFIG",
+        "start_sector": 196608,
+        "sectors": 32768,
+        "within_usable_range": true
+      },
+      {
+        "number": 4,
+        "name": "FACTORY",
+        "start_sector": 229376,
+        "sectors": 4096,
+        "within_usable_range": true
+      },
+      {
+        "number": 5,
+        "name": "MEDIA",
+        "start_sector": 233472,
+        "sectors": 4096,
+        "within_usable_range": true
+      },
+      {
+        "number": 7,
+        "name": "RESERVED2",
+        "start_sector": 237568,
+        "sectors": 8192,
+        "within_usable_range": true
+      },
+      {
+        "number": 8,
+        "name": "VOIDROOT",
+        "start_sector": 286720,
+        "sectors": 30470144,
+        "within_usable_range": true
+      },
+      {
+        "number": 10,
+        "name": "BOOT",
+        "start_sector": 106496,
+        "sectors": 40960,
+        "within_usable_range": true
+      },
+      {
+        "number": 11,
+        "name": "RECOVERY",
+        "start_sector": 147456,
+        "sectors": 40960,
+        "within_usable_range": true
+      },
+      {
+        "number": 12,
+        "name": "RESERVED3",
+        "start_sector": 188416,
+        "sectors": 8192,
+        "within_usable_range": true
+      },
+      {
+        "number": 14,
+        "name": "CARRIER",
+        "start_sector": 245760,
+        "sectors": 8192,
+        "within_usable_range": true
+      },
+      {
+        "number": 15,
+        "name": "TDATA",
+        "start_sector": 253952,
+        "sectors": 8192,
+        "within_usable_range": true
+      },
+      {
+        "number": 16,
+        "name": "PARAM",
+        "start_sector": 73728,
+        "sectors": 8192,
+        "within_usable_range": true
+      },
+      {
+        "number": 17,
+        "name": "PERSDATA",
+        "start_sector": 262144,
+        "sectors": 24576,
+        "within_usable_range": true
+      },
+      {
+        "number": 18,
+        "name": "BOTA0",
+        "start_sector": 8192,
+        "sectors": 4096,
+        "within_usable_range": true
+      },
+      {
+        "number": 19,
+        "name": "BOTA1",
+        "start_sector": 12288,
+        "sectors": 4096,
+        "within_usable_range": true
+      },
+      {
+        "number": 20,
+        "name": "DNX",
+        "start_sector": 88064,
+        "sectors": 2048,
+        "within_usable_range": true
+      },
+      {
+        "number": 21,
+        "name": "OTA",
+        "start_sector": 90112,
+        "sectors": 16384,
+        "within_usable_range": true
+      }
+    ]
+  },
+  "partition_arrays_differ": true,
+  "note": "Read only. No repair or automatic table-selection recommendation.",
+  "captured": "2026-09-28",
+  "scope": "Single development GT-P5210; reference only, not an installation partition template."
+}
