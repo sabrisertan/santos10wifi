@@ -1,0 +1,15 @@
+# Santos exact-1.12 PVR/SGX skeleton (M4 S3)
+
+Vendored SOURCES (verbatim Samsung 1.12.2701748, `src/`):
+`include4/`, `services4/include/`, `services4/srvkm/{common,
+bridged,devices/sgx,env/linux}`, `services4/system/intel_drm/`,
+`services4/gburst/`. Provenance: 3.4 tree
+`drivers/staging/intel_media/graphics/sgx/`.
+
+Santos-OWNED (reviewable): `Makefile` (object list + golden PVRDEFS
+from `bld/clovertrail/pvrdefs`), `Kconfig` hook (parent files),
+this README. ABI headers under `src/` are FROZEN.
+
+Rules: no ABI struct/ioctl edits to satisfy the compiler; stub only
+external (non-SGX) missing pieces with clear labels; no PCI probe
+in skeleton phase (module must load/bind nothing).

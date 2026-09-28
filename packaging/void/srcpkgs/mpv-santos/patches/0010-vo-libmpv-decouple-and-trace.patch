@@ -1,0 +1,406 @@
+--- a/video/out/vo.h
++++ b/video/out/vo.h
+@@ -530,6 +530,11 @@
+ int vo_control(struct vo *vo, int request, void *data);
+ void vo_control_async(struct vo *vo, int request, void *data);
+ bool vo_is_ready_for_frame(struct vo *vo, int64_t next_pts);
++
++// SANTOS VO HOP TRACE. Off unless SANTOS_VO_TRACE is set to a non-"0" value.
++bool vo_trace_enabled(void);
++void vo_trace_event(const char *stage, unsigned long long frame_id,
++                    const char *fmt, ...);
+ bool vo_is_visible(struct vo *vo);
+ void vo_queue_frame(struct vo *vo, struct vo_frame *frame);
+ void vo_wait_frame(struct vo *vo);
+--- a/video/out/vo.c
++++ b/video/out/vo.c
+@@ -26,6 +26,7 @@
+ #include "mpv_talloc.h"
+ 
+ #include "config.h"
++#include <stdarg.h>
+ #include "osdep/timer.h"
+ #include "osdep/threads.h"
+ #include "misc/dispatch.h"
+@@ -834,6 +835,60 @@
+ // callback once the time is right.
+ // If next_pts is negative, disable any timing and draw the frame as fast as
+ // possible.
++// ---- SANTOS VO HOP TRACE (diagnostic, bounded, off unless SANTOS_VO_TRACE) --
++//
++// WHY THIS EXISTS. The app-side trace can show that a frame was already late by
++// the time the render API handed it over, but `vo_is_ready_for_frame()` makes
++// that STRUCTURALLY EXPECTED: it refuses to report ready while
++// `next_pts - timing_offset - flip_queue_offset > now`, so with
++// `video-timing-offset=0` a non-positive margin at handoff proves nothing about
++// lateness. The real deadline is the strict drop condition in render_frame(),
++// `end_time = pts + duration` dropped when `end_time < now`. So the hops have to
++// be measured inside the VO, on mpv's own clock, keyed by frame.
++//
++// Two things make attribution possible rather than merely possible-in-principle:
++// there are exactly TWO sites in this VO that increment drop_count -- the strict
++// `end_time < now` path in render_frame() and the 200 ms consumer-timeout
++// cleanup in vo_libmpv's flip_page() -- so every counted drop lands in one of
++// them, and this trace names which.
++//
++// Emitted on stderr, which the client's helper already redirects to the log.
++// Timestamps are mp_time_ns(), the same clock vo_is_ready_for_frame() itself uses
++// and the same clock `next_frame.pts` is expressed in.
++static int vo_trace_state = -1;
++static unsigned long vo_trace_lines = 0;
++// 4000 was hit inside a 30 s run, which silently truncated the evidence. The
++// bound is kept, but raised so a bounded 30 s run is covered end to end, and the
++// analyser is told the cap so it can refuse to claim whole-run percentiles if the
++// trace ever does stop early.
++#define VO_TRACE_MAX_LINES 40000
++
++bool vo_trace_enabled(void)
++{
++    if (vo_trace_state < 0) {
++        const char *e = getenv("SANTOS_VO_TRACE");
++        vo_trace_state = (e && *e && *e != '0') ? 1 : 0;
++    }
++    return vo_trace_state == 1;
++}
++
++void vo_trace_event(const char *stage, unsigned long long frame_id,
++                    const char *fmt, ...)
++{
++    if (!vo_trace_enabled())
++        return;
++    if (vo_trace_lines >= VO_TRACE_MAX_LINES)
++        return;
++    vo_trace_lines++;
++    va_list ap;
++    fprintf(stderr, "SANTOS_VOTRACE stage=%s frame_id=%llu ", stage, frame_id);
++    va_start(ap, fmt);
++    vfprintf(stderr, fmt, ap);
++    va_end(ap);
++    fprintf(stderr, "\n");
++    fflush(stderr);
++}
++
+ bool vo_is_ready_for_frame(struct vo *vo, int64_t next_pts)
+ {
+     struct vo_internal *in = vo->in;
+@@ -857,6 +912,26 @@
+                 wakeup_locked(vo);
+         }
+     }
++    // Trace AFTER the result is final and BEFORE the unlock is dropped, so the
++    // recorded `ready` is the value actually returned. `adj` reproduces the two
++    // subtractions the decision made, and `adj - now` is the negative quantity
++    // the caller is being asked to wait out.
++    if (vo_trace_enabled()) {
++        unsigned long long id = in->frame_queued ? (unsigned long long)in->frame_queued->frame_id
++                           : (in->current_frame ? (unsigned long long)in->current_frame->frame_id : 0ULL);
++        int64_t adj = next_pts;
++        int64_t now = mp_time_ns();
++        if (next_pts >= 0)
++            adj = next_pts - in->timing_offset - in->flip_queue_offset;
++        vo_trace_event("ready", id,
++            "next_pts=%lld adj_pts=%lld now=%lld timing_offset=%lld flip_queue_offset=%lld "
++            "adj_minus_now_ms=%.3f ready=%d frame_queued=%d rendering_next=%d",
++            (long long)next_pts, (long long)adj, (long long)now,
++            (long long)in->timing_offset, (long long)in->flip_queue_offset,
++            (adj - now) / 1000000.0, r ? 1 : 0,
++            in->frame_queued ? 1 : 0,
++            (in->current_frame && in->current_frame->num_vsyncs < 1) ? 1 : 0);
++    }
+     mp_mutex_unlock(&in->lock);
+     return r;
+ }
+@@ -883,6 +958,11 @@
+     in->hasframe = true;
+     frame->frame_id = ++(in->current_frame_id);
+     in->frame_queued = frame;
++    vo_trace_event("queued", (unsigned long long)frame->frame_id,
++        "now=%lld pts=%lld duration_ns=%.0f display_synced=%d can_drop=%d redraw=%d repeat=%d num_vsyncs=%d",
++        (long long)mp_time_ns(), (long long)frame->pts, frame->duration,
++        frame->display_synced ? 1 : 0, frame->can_drop ? 1 : 0,
++        frame->redraw ? 1 : 0, frame->repeat ? 1 : 0, frame->num_vsyncs);
+     in->wakeup_pts = frame->display_synced
+                    ? 0 : frame->pts + MPMAX(frame->duration, 0);
+     wakeup_locked(vo);
+@@ -954,6 +1034,24 @@
+ 
+     // "normal" strict drop threshold.
+     in->dropped_frame = duration >= 0 && end_time < now;
++    {
++        // The real deadline. `end_time - now` is the signed distance from the
++        // instant the frame becomes eligible to be dropped for lateness; a
++        // positive value means the deadline has NOT yet passed. This is the only
++        // lateness measurement in the whole pass that is not confounded by
++        // vo_is_ready_for_frame()'s deliberate wait.
++        int64_t behind_100 = now - in->prev_vsync;
++        vo_trace_event("render", (unsigned long long)frame->frame_id,
++            "now=%lld pts=%lld duration_ns=%.0f end_time=%lld end_minus_now_ms=%.3f "
++            "can_drop=%d display_synced=%d hasframe_rendered=%d behind_100ms_guard=%d "
++            "vo_caps_framedrop=%d target=%lld",
++            (long long)now, (long long)pts, (double)duration, (long long)end_time,
++            (end_time - now) / 1000000.0, frame->can_drop ? 1 : 0,
++            frame->display_synced ? 1 : 0, in->hasframe_rendered ? 1 : 0,
++            behind_100 < MP_TIME_MS_TO_NS(100) ? 1 : 0,
++            (vo->driver->caps & VO_CAP_FRAMEDROP) ? 1 : 0,
++            (long long)target);
++    }
+ 
+     in->dropped_frame &= !frame->display_synced;
+     in->dropped_frame &= !(vo->driver->caps & VO_CAP_FRAMEDROP);
+@@ -991,6 +1089,17 @@
+     bool request_redraw = in->request_redraw;
+ 
+     if (in->dropped_frame) {
++        // Name the mechanism at the only site that owns it. The `end_time_lt_now`
++        // flag is the strict lateness rule; when it is 0 the drop came from one
++        // of the other ANDed conditions above (display_synced, VO_CAP_FRAMEDROP,
++        // can_drop, the 10 FPS degrade guard, or hasframe_rendered), and those are
++        // distinguishable from the flags recorded in the `render` event.
++        vo_trace_event("drop", (unsigned long long)frame->frame_id,
++            "reason=%s now=%lld pts=%lld duration_ns=%.0f end_time=%lld end_minus_now_ms=%.3f "
++            "drop_count=%lld",
++            (duration >= 0 && end_time < now) ? "end_time_lt_now" : "other_and_condition",
++            (long long)now, (long long)pts, (double)duration, (long long)end_time,
++            (end_time - now) / 1000000.0, (long long)(in->drop_count + 1));
+         in->drop_count += 1;
+         wakeup_core(vo);
+     } else {
+--- a/video/out/vo_libmpv.c
++++ b/video/out/vo_libmpv.c
+@@ -86,6 +86,7 @@
+ 
+     // --- Protected by lock
+     struct vo_frame *next_frame;    // next frame to draw
++    bool next_frame_flipped;        // whether flip_page has already executed for next_frame
+     int64_t present_count;          // incremented when next frame can be shown
+     int64_t expected_flip_count;    // next vsync event for next_frame
+     bool redrawing;                 // next_frame was a redraw request
+@@ -386,8 +387,10 @@
+     struct vo_frame *frame = ctx->next_frame;
+     int64_t wait_present_count = ctx->present_count;
+     if (frame) {
++        bool already_flipped = ctx->next_frame_flipped;
+         ctx->next_frame = NULL;
+-        if (!(frame->redraw || !frame->current))
++        ctx->next_frame_flipped = false;
++        if (!already_flipped && !(frame->redraw || !frame->current))
+             wait_present_count += 1;
+         mp_cond_broadcast(&ctx->video_wait);
+         talloc_free(ctx->cur_frame);
+@@ -445,6 +448,17 @@
+     mp_mutex_lock(&ctx->lock);
+     if (ctx->next_frame)
+         res |= MPV_RENDER_UPDATE_FRAME;
++    // PUBLICATION. This is the instant the app can first observe the frame, and
++    // the app's own pending timestamp is taken immediately after this call
++    // returns. Both are mp_time_ns(), so `app_pending - publish` is the exact
++    // publish-to-app hop with no clock conversion.
++    if (ctx->next_frame) {
++        struct vo_frame *f = ctx->next_frame;
++        vo_trace_event("publish", (unsigned long long)f->frame_id,
++            "now=%lld pts=%lld duration_ns=%.0f redraw=%d repeat=%d display_synced=%d",
++            (long long)mp_time_ns(), (long long)f->pts, f->duration,
++            f->redraw ? 1 : 0, f->repeat ? 1 : 0, f->display_synced ? 1 : 0);
++    }
+     mp_mutex_unlock(&ctx->lock);
+     return res;
+ }
+@@ -473,7 +487,21 @@
+                 (frame->repeat ? MPV_RENDER_FRAME_INFO_REPEAT : 0) |
+                 (frame->display_synced && !frame->redraw ?
+                     MPV_RENDER_FRAME_INFO_BLOCK_VSYNC : 0);
++            // NOTE THE UNIT, which is the whole point of L230: this copies
++            // `vo_frame.pts`, and `pts` is in mp_time_ns() units (it is produced
++            // by MP_TIME_S_TO_NS and compared against mp_time_ns() in
++            // vo_is_ready_for_frame). include/mpv/render.h documents
++            // mpv_render_frame_info.target_time as being in mpv_get_time_us()
++            // units. That header/implementation mismatch is upstream mpv 0.41,
++            // not a private Santos clock. Recorded here so the discrepancy is
++            // visible in the same trace that uses the value.
+             info->target_time = frame->pts;
++            vo_trace_event("next_frame_info", (unsigned long long)frame->frame_id,
++                "now=%lld target_time_reported=%lld unit=ns_despite_header_saying_us "
++                "pts=%lld duration_ns=%.0f flags_present=1 redraw=%d repeat=%d",
++                (long long)mp_time_ns(), (long long)info->target_time,
++                (long long)frame->pts, frame->duration,
++                frame->redraw ? 1 : 0, frame->repeat ? 1 : 0);
+         }
+         res = 0;
+         break;
+@@ -485,16 +513,55 @@
+     return res;
+ }
+ 
++static bool santos_vo_libmpv_decouple(void)
++{
++    static int decouple_val = -1;
++    if (decouple_val < 0) {
++        const char *e = getenv("SANTOS_VO_LIBMPV_DECOUPLE");
++        if (e && (strcmp(e, "1") == 0 || strcmp(e, "yes") == 0 || strcmp(e, "true") == 0))
++            decouple_val = 1;
++        else
++            decouple_val = 0;
++    }
++    return decouple_val == 1;
++}
++
+ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
+ {
+     struct vo_priv *p = vo->priv;
+     struct mpv_render_context *ctx = p->ctx;
+ 
+     mp_mutex_lock(&ctx->lock);
+-    mp_assert(!ctx->next_frame);
++    if (santos_vo_libmpv_decouple()) {
++        if (ctx->next_frame) {
++            vo_trace_event("drop", (unsigned long long)ctx->next_frame->frame_id,
++                "reason=superseded_in_draw_frame now=%lld pts=%lld duration_ns=%.0f "
++                "end_time=%lld end_minus_now_ms=%.3f drop_count=%lld",
++                (long long)mp_time_ns(), (long long)ctx->next_frame->pts,
++                ctx->next_frame->duration,
++                (long long)(ctx->next_frame->pts + (int64_t)ctx->next_frame->duration),
++                (ctx->next_frame->pts + (int64_t)ctx->next_frame->duration - mp_time_ns()) / 1000000.0,
++                (long long)vo_get_drop_count(vo));
++            talloc_free(ctx->next_frame);
++            ctx->next_frame = NULL;
++            vo_increment_drop_count(vo, 1);
++        }
++    } else {
++        mp_assert(!ctx->next_frame);
++    }
+     ctx->next_frame = vo_frame_ref(frame);
++    ctx->next_frame_flipped = false;
+     ctx->expected_flip_count = ctx->flip_count + 1;
+     ctx->redrawing = frame->redraw || !frame->current;
++    vo_trace_event("draw_frame", (unsigned long long)frame->frame_id,
++        "now=%lld pts=%lld duration_ns=%.0f end_time=%lld end_minus_now_ms=%.3f "
++        "redrawing=%d current=%d redraw=%d repeat=%d display_synced=%d",
++        (long long)mp_time_ns(), (long long)frame->pts, frame->duration,
++        (long long)(frame->pts + (int64_t)frame->duration),
++        (frame->pts + (int64_t)frame->duration - mp_time_ns()) / 1000000.0,
++        ctx->redrawing ? 1 : 0, frame->current ? 1 : 0,
++        frame->redraw ? 1 : 0, frame->repeat ? 1 : 0,
++        frame->display_synced ? 1 : 0);
+     mp_mutex_unlock(&ctx->lock);
+ 
+     update(ctx);
+@@ -506,19 +573,51 @@
+     struct vo_priv *p = vo->priv;
+     struct mpv_render_context *ctx = p->ctx;
+     int64_t until = mp_time_ns() + MP_TIME_MS_TO_NS(200);
++    // The 200 ms budget is computed ONCE and shared by BOTH waits below, so it is
++    // a total budget for the call and not a budget for each wait. Recorded
++    // explicitly because it is a real drop path and it is easy to misread as two
++    // independent 200 ms waits.
++    int64_t t_enter = mp_time_ns();
++    int wait_render_timeout = 0;
++    int wait_present_timeout = 0;
++    int no_flip_count_break = 0;
++    int cleanup_drop = 0;
++    int64_t t_render_done = 0;
++    int64_t t_present_done = 0;
+ 
+     mp_mutex_lock(&ctx->lock);
+ 
++    if (santos_vo_libmpv_decouple()) {
++        t_render_done = mp_time_ns();
++        t_present_done = t_render_done;
++        ctx->next_frame_flipped = true;
++        ctx->present_count += 1;
++        mp_cond_broadcast(&ctx->video_wait);
++
++        struct vo_frame *f = ctx->cur_frame ? ctx->cur_frame : ctx->next_frame;
++        vo_trace_event("flip", f ? (unsigned long long)f->frame_id : 0ULL,
++            "now=%lld enter=%lld render_wait_ms=0.0 present_wait_ms=0.0 total_ms=0.0 "
++            "wait_render_timeout=0 wait_present_timeout=0 no_flip_count_break=1 "
++            "cleanup_drop=0 redrawing=%d flip_count=%lld decoupled=1",
++            (long long)mp_time_ns(), (long long)t_enter,
++            ctx->redrawing ? 1 : 0, (long long)ctx->flip_count);
++
++        mp_mutex_unlock(&ctx->lock);
++        return;
++    }
++
+     // Wait until frame was rendered
+     while (ctx->next_frame) {
+         if (mp_cond_timedwait_until(&ctx->video_wait, &ctx->lock, until)) {
+             if (ctx->next_frame) {
++                wait_render_timeout = 1;
+                 MP_VERBOSE(vo, "mpv_render_context_render() not being called "
+                            "or stuck.\n");
+                 goto done;
+             }
+         }
+     }
++    t_render_done = mp_time_ns();
+ 
+     // Unblock mpv_render_context_render().
+     ctx->present_count += 1;
+@@ -531,26 +630,66 @@
+     while (ctx->expected_flip_count > ctx->flip_count) {
+         // mpv_render_report_swap() is declared as optional API.
+         // Assume the user calls it consistently _if_ it's called at all.
+-        if (!ctx->flip_count)
++        if (!ctx->flip_count) {
++            // This product NEVER calls report_swap (L214a), so flip_count stays 0
++            // and this loop is skipped immediately rather than burning the
++            // remaining budget. Recorded, because "the presented-wait timed out"
++            // and "the presented-wait was never entered" are very different
++            // claims and only one of them can be true here.
++            no_flip_count_break = 1;
+             break;
++        }
+         if (mp_cond_timedwait_until(&ctx->video_wait, &ctx->lock, until)) {
++            wait_present_timeout = 1;
+             MP_VERBOSE(vo, "mpv_render_report_swap() not being called.\n");
+             goto done;
+         }
+     }
+ 
+ done:
++    t_present_done = mp_time_ns();
+ 
+     // Cleanup after the API user is not reacting, or is being unusually slow.
+     if (ctx->next_frame) {
++        cleanup_drop = 1;
+         talloc_free(ctx->cur_frame);
+         ctx->cur_frame = ctx->next_frame;
+         ctx->next_frame = NULL;
+         ctx->present_count += 2;
+         mp_cond_signal(&ctx->video_wait);
++        // The ONLY other place in the whole VO that increments drop_count. Named
++        // so the two drop mechanisms can be told apart in the count.
++        vo_trace_event("drop", (unsigned long long)ctx->cur_frame->frame_id,
++            "reason=flip_page_200ms_consumer_timeout now=%lld pts=%lld duration_ns=%.0f "
++            "end_time=%lld end_minus_now_ms=%.3f waited_ms=%.1f drop_count=%lld",
++            (long long)mp_time_ns(), (long long)ctx->cur_frame->pts,
++            ctx->cur_frame->duration,
++            (long long)(ctx->cur_frame->pts + (int64_t)ctx->cur_frame->duration),
++            (ctx->cur_frame->pts + (int64_t)ctx->cur_frame->duration
++             - mp_time_ns()) / 1000000.0,
++            (mp_time_ns() - t_enter) / 1000000.0, (long long)vo_get_drop_count(vo));
+         vo_increment_drop_count(vo, 1);
+     }
+ 
++    // One summary line per flip_page, so the 200 ms timeout is counted
++    // explicitly rather than inferred from silence.
++    {
++        struct vo_frame *f = ctx->cur_frame;
++        vo_trace_event("flip", f ? (unsigned long long)f->frame_id : 0ULL,
++            "now=%lld enter=%lld render_wait_ms=%.1f present_wait_ms=%.1f total_ms=%.1f "
++            "wait_render_timeout=%d wait_present_timeout=%d no_flip_count_break=%d "
++            "cleanup_drop=%d redrawing=%d flip_count=%lld",
++            (long long)mp_time_ns(), (long long)t_enter,
++            // Guarded: the render wait can `goto done` before t_render_done is
++            // set, and an unguarded difference would print a large NEGATIVE
++            // duration that reads like a timing result rather than an unset field.
++            t_render_done ? (t_render_done - t_enter) / 1000000.0 : -1.0,
++            (t_present_done - (t_render_done ? t_render_done : t_enter)) / 1000000.0,
++            (mp_time_ns() - t_enter) / 1000000.0,
++            wait_render_timeout, wait_present_timeout, no_flip_count_break,
++            cleanup_drop, ctx->redrawing ? 1 : 0, (long long)ctx->flip_count);
++    }
++
+     mp_mutex_unlock(&ctx->lock);
+ }
+ 

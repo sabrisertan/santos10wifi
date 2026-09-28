@@ -1,0 +1,10 @@
+# INSTALL
+case "$ACTION" in
+pre)
+	# Package installation is deliberately non-activating. The route manager
+	# runs at the controlled product-session boundary instead.
+	;;
+post)
+	/usr/libexec/santos-gtk-client-routes inspect >/dev/null
+	;;
+esac

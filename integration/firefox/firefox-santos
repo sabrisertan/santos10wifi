@@ -1,0 +1,101 @@
+#!/bin/sh
+#
+# firefox-santos - production launcher for Firefox ESR 78.15 on Santos10wifi.
+#
+# This is the ONLY supported way to start the Santos Firefox. It launches the
+# accepted product candidate with exactly the graphics compatibility environment
+# that was proven to work, and nothing else.
+#
+# ACCEPTED DEPENDENCY SET (all four items are required together):
+#   1. Firefox ESR78 candidate with product patch 0001 only
+#        /opt/firefox78-gles2-candidate
+#   2. guarded tlsfix
+#        /root/libsantos-tlsfix.so
+#   3. hybris eglSwapBuffersWithDamageKHR interception fix
+#        $RUNTIME/lib/libEGL.so.1.0.0
+#        (Firefox-private copy; the system /usr/lib/santos-hybris/libEGL.so.1.0.0
+#         is deliberately NOT replaced)
+#   4. ABI-matching private hybris libwayland-egl
+#        $RUNTIME/lib/libwayland-egl.so.1
+#        (byte-identical copy of the proven /root/santos/hybris-wayland one; the
+#         platform module's private wl_egl_window layout requires it, and the
+#         upstream 44-byte layout is ABI-incompatible)
+#   plus the normal deployed L29 Wayland platform module
+#        $RUNTIME/platforms/eglplatform_wayland.so
+#
+# NOT SET, ON PURPOSE: no diagnostic tracing (HYBRIS_TRACE,
+# HYBRIS_LOGGING_TARGET), no Marionette, no MOZ_GL_SPEW, no MOZ_GL_DUMP_EXTS, no
+# instrumentation build, and no unrelated GTK application variables.
+#
+# Usage: firefox-santos [URL ...]
+#
+set -u
+
+RUNTIME=/opt/firefox78-santos-runtime
+BIN=/opt/firefox78-gles2-candidate/firefox
+TLSFIX=/root/libsantos-tlsfix.so
+PRIV_WLEGL=$RUNTIME/lib/libwayland-egl.so.1
+PLATFORM_DIR=$RUNTIME/platforms
+PROFILE_TEMPLATE=$RUNTIME/profile-template/user.js
+
+die() { echo "firefox-santos: $*" >&2; exit 1; }
+
+# Firefox refuses to run as root ("Running Firefox as root in a regular user's
+# session is not supported"), so fail with a clear message instead of letting it
+# produce a cryptic one. The desktop entry always runs as the desktop user.
+[ "$(id -u)" = 0 ] && die "must not run as root; run as the desktop user (santos)."
+
+[ -x "$BIN" ]      || die "missing Firefox candidate: $BIN"
+[ -r "$TLSFIX" ]   || die "missing guarded tlsfix: $TLSFIX"
+[ -r "$PRIV_WLEGL" ] || die "missing private libwayland-egl: $PRIV_WLEGL"
+[ -r "$PLATFORM_DIR/eglplatform_wayland.so" ] \
+                   || die "missing Wayland platform module: $PLATFORM_DIR"
+[ -r "$PROFILE_TEMPLATE" ] || die "missing profile template: $PROFILE_TEMPLATE"
+
+# --- session identity -------------------------------------------------------
+: "${HOME:=/home/santos}"
+export HOME
+USER=santos; LOGNAME=santos
+export USER LOGNAME
+export XDG_RUNTIME_DIR=/run/user/1001
+export WAYLAND_DISPLAY=wayland-0
+export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus
+
+# native Wayland only: no X11 fallback
+unset DISPLAY
+export MOZ_ENABLE_WAYLAND=1
+
+# --- the graphics compatibility set (the only non-default graphics vars) -----
+# Firefox-private hybris EGL (KHR interception) plus the private
+# libwayland-egl and the other hybris libraries it needs. This replaces the
+# former /tmp/firefox-egl-shim, so the product no longer depends on /tmp.
+export LD_LIBRARY_PATH=$RUNTIME/lib
+export HYBRIS_EGLPLATFORM=wayland
+export HYBRIS_EGLPLATFORM_DIR=$PLATFORM_DIR
+export EGL_PLATFORM=wayland
+
+# libwayland-egl is preloaded by absolute path, which is the mechanism the
+# accepted gate used and which takes precedence over any search path.
+export LD_PRELOAD=$TLSFIX:$PRIV_WLEGL
+
+# Carried over verbatim from the accepted gate. This is a deliberate,
+# visible carry-over, not an oversight: it is a security-relevant setting, so
+# it is recorded here rather than changed without a decision.
+export MOZ_DISABLE_CONTENT_SANDBOX=1
+
+# --- product profile --------------------------------------------------------
+# Seeded once from the accepted three-preference template. The existing
+# .mozilla/firefox78-test profile is NOT used: it carries a recorded
+# gfx.blacklist.layers.opengl failure marker and so is not the accepted
+# configuration.
+PROFILE=$HOME/.mozilla/firefox-santos
+if [ ! -f "$PROFILE/user.js" ]; then
+    mkdir -p "$PROFILE" || die "cannot create profile: $PROFILE"
+    cp "$PROFILE_TEMPLATE" "$PROFILE/user.js" \
+        || die "cannot seed profile prefs: $PROFILE/user.js"
+fi
+
+# --- launch -----------------------------------------------------------------
+# Argument forwarding is deliberately plain, so the desktop entry's %u and any
+# URL or path given on the command line reach Firefox unchanged.
+exec "$BIN" -profile "$PROFILE" "$@"

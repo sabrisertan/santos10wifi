@@ -1,0 +1,63 @@
+# Template file for 'santos-gtk-client-runtime'
+pkgname=santos-gtk-client-runtime
+version=1.0
+revision=8
+depends="python3 libhybris-santos>=20260908_3"
+short_desc="Scoped Santos GTK4 client runtime and route policy"
+maintainer="Orphaned <orphan@voidlinux.org>"
+license="GPL-2.0-or-later"
+homepage="https://github.com/void-linux/void-packages"
+conf_files="/etc/santos/gtk4-client.ini"
+
+do_install() {
+	install -d "$DESTDIR/usr/libexec"
+	${CC} ${CPPFLAGS} ${CFLAGS} -std=c11 -D_POSIX_C_SOURCE=200809L \
+		-fPIE ${LDFLAGS} -pie \
+		-o "$DESTDIR/usr/libexec/santos-client-environment" \
+		"$FILESDIR/santos-client-environment.c"
+	chmod 755 "$DESTDIR/usr/libexec/santos-client-environment"
+	install -Dm644 "$FILESDIR/gtk4-client.ini" \
+		"$DESTDIR/etc/santos/gtk4-client.ini"
+	install -Dm755 "$FILESDIR/santos-gtk-client-routes" \
+		"$DESTDIR/usr/libexec/santos-gtk-client-routes"
+
+	install -d "$DESTDIR/usr/lib/santos-gtk-runtime/bin"
+	for name in gnome-control-center nautilus gnome-text-editor gnome-calculator ptyxis eog; do
+		install -Dm755 "$FILESDIR/bin/$name" \
+			"$DESTDIR/usr/lib/santos-gtk-client-runtime/bin/$name"
+	done
+
+	install -d "$DESTDIR/usr/lib/santos-gtk-client-runtime/share/applications"
+	for name in org.gnome.Settings org.gnome.Nautilus org.gnome.TextEditor \
+		org.gnome.Calculator org.gnome.Ptyxis org.gnome.eog; do
+		install -Dm644 "$FILESDIR/applications/$name.desktop" \
+			"$DESTDIR/usr/lib/santos-gtk-client-runtime/share/applications/$name.desktop"
+	done
+
+	install -d "$DESTDIR/usr/lib/santos-gtk-client-runtime/share/dbus-1/services"
+	for name in org.gnome.Settings org.gnome.Nautilus \
+		org.freedesktop.FileManager1 org.gnome.TextEditor org.gnome.Ptyxis; do
+		install -Dm644 "$FILESDIR/dbus-services/$name.service" \
+			"$DESTDIR/usr/lib/santos-gtk-client-runtime/share/dbus-1/services/$name.service"
+	done
+
+	install -d "$DESTDIR/usr/lib/santos-gtk-runtime"
+	ln -s /opt/gtk422-santos/libgtk-4.so.1.2200.4.santos \
+		"$DESTDIR/usr/lib/santos-gtk-runtime/libgtk-4.so.1"
+	ln -s /root/santos/hybris-wayland/lib/libwayland-egl.so.1 \
+		"$DESTDIR/usr/lib/santos-gtk-runtime/libwayland-egl.so.1"
+	ln -s /root/santos/hybris-wayland/lib/libhybris-eglplatformcommon.so.1 \
+		"$DESTDIR/usr/lib/santos-gtk-runtime/libhybris-eglplatformcommon.so.1"
+	ln -s /usr/lib/santos-hybris/libEGL.so.1.0.0 \
+		"$DESTDIR/usr/lib/santos-gtk-runtime/libEGL.so.1"
+	ln -s /usr/lib/santos-hybris/libGLESv2.so.2.0.0 \
+		"$DESTDIR/usr/lib/santos-gtk-runtime/libGLESv2.so.2"
+	ln -s /usr/lib/santos-hybris/libhardware.so.2.0.0 \
+		"$DESTDIR/usr/lib/santos-gtk-runtime/libhardware.so.2"
+	ln -s /usr/lib/santos-hybris/libhybris-common.so.1.0.0 \
+		"$DESTDIR/usr/lib/santos-gtk-runtime/libhybris-common.so.1"
+	ln -s /usr/lib/santos-hybris/libgralloc.so.1.0.0 \
+		"$DESTDIR/usr/lib/santos-gtk-runtime/libgralloc.so.1"
+	ln -s /usr/lib/santos-hybris/libsync.so.2.0.0 \
+		"$DESTDIR/usr/lib/santos-gtk-runtime/libsync.so.2"
+}

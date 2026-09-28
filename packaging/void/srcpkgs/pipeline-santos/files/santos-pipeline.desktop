@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Pipeline Santos
+Comment=YouTube videos through Santos VDX hardware video
+Exec=/usr/libexec/santos-client-environment --profile /etc/santos/gtk4-client.ini --exec /usr/bin/pipeline-santos
+Icon=de.schmidhuberj.tubefeeder
+Terminal=false
+Categories=AudioVideo;Video;GTK;
+StartupNotify=true

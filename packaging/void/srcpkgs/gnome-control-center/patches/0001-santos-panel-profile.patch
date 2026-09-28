@@ -1,0 +1,149 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Santos10wifi maintainers <orphan@voidlinux.org>
+Date: Tue, 23 Sep 2026 20:00:00 +0300
+Subject: [PATCH] gnome-control-center: add Santos panel profile
+
+Keep the upstream default panel set available, and add an opt-in Santos
+profile that excludes only the demonstrably unused Printers/Samba panel.
+The profile conditionally removes its static archive, loader entry, tests,
+desktop resource, CUPS dependency, and header checks.
+
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -1,4 +1,5 @@
+ option('deprecated-declarations', type: 'feature', value: 'disabled', description: 'build with deprecated declaration warnings')
++option('panel_profile', type: 'combo', choices: ['default', 'santos'], value: 'default', description: 'select the product panel profile')
+ option('documentation', type: 'boolean', value: false, description: 'build documentation')
+ option('location-services', type: 'feature', value: 'enabled', description: 'build with location services')
+ option('ibus', type: 'boolean', value: true, description: 'build with IBus support')
+--- a/meson.build
++++ b/meson.build
+@@ -231,30 +231,39 @@
+                description: 'Define if langinfo.h supports _NL_TIME_FIRST_WEEKDAY')
+ endif
+ 
+-# Check for CUPS 1.4 or newer
+-cups_dep = dependency('cups', version : '>= 1.4', required: false)
+-assert(cups_dep.found(), 'CUPS 1.4 or newer not found')
++# The Santos product profile intentionally excludes the Printers panel. The
++# default profile remains upstream-compatible.
++enable_printers = get_option('panel_profile') != 'santos'
++config_h.set10('BUILD_PANEL_PRINTERS', enable_printers,
++               description: 'Define to 1 to build the Printers panel')
+ 
+-# https://bugzilla.gnome.org/show_bug.cgi?id=696766
++# Check for CUPS 1.4 or newer only when the Printers panel is selected.
++cups_dep = disabler()
+ cups_cflags = []
+-if cups_dep.version().version_compare('>= 1.6')
+-  cups_cflags += '-D_PPD_DEPRECATED='
++if enable_printers
++  cups_dep = dependency('cups', version : '>= 1.4', required: false)
++  assert(cups_dep.found(), 'CUPS 1.4 or newer not found')
++
++  # https://bugzilla.gnome.org/show_bug.cgi?id=696766
++  if cups_dep.version().version_compare('>= 1.6')
++    cups_cflags += '-D_PPD_DEPRECATED='
++  endif
++
++  # cups headers
++  check_headers = [
++    ['HAVE_CUPS_CUPS_H', 'cups/cups.h'],
++    ['HAVE_CUPS_PPD_H', 'cups/ppd.h']
++  ]
++
++  foreach header: check_headers
++    assert(cc.has_header(header[1], args: cups_cflags), 'CUPS headers not found: ' + header[1])
++  endforeach
++
++  config_h.set10('HAVE_CUPS_HTTPCONNECT2',
++                 cc.has_function('httpConnect2', dependencies: cups_dep),
++                 description: 'Define if httpConnect2() is available in CUPS')
+ endif
+ 
+-# cups headers
+-check_headers = [
+-  ['HAVE_CUPS_CUPS_H', 'cups/cups.h'],
+-  ['HAVE_CUPS_PPD_H', 'cups/ppd.h']
+-]
+-
+-foreach header: check_headers
+-  assert(cc.has_header(header[1], args: cups_cflags), 'CUPS headers not found: ' + header[1])
+-endforeach
+-
+-config_h.set10('HAVE_CUPS_HTTPCONNECT2',
+-               cc.has_function('httpConnect2', dependencies: cups_dep),
+-               description: 'Define if httpConnect2() is available in CUPS')
+-
+ # IBus support
+ enable_ibus = get_option('ibus')
+ if enable_ibus
+--- a/panels/meson.build
++++ b/panels/meson.build
+@@ -36,6 +36,31 @@
+   ]
+ endif
+ 
++if get_option('panel_profile') == 'santos'
++  panels = [
++    'applications',
++    'background',
++    'bluetooth',
++    'color',
++    'display',
++    'mouse',
++    'multitasking',
++    'network',
++    'notifications',
++    'online-accounts',
++    'power',
++    'privacy',
++    'search',
++    'sharing',
++    'sound',
++    'system',
++    'universal-access',
++    'wacom',
++    'wellbeing',
++    'wwan',
++  ]
++endif
++
+ panels_list = []
+ panels_libs = []
+ foreach cappletname: dependent_panels + panels
+--- a/shell/cc-panel-loader.c
++++ b/shell/cc-panel-loader.c
+@@ -49,7 +49,9 @@
+ extern GType cc_notifications_panel_get_type (void);
+ extern GType cc_online_accounts_panel_get_type (void);
+ extern GType cc_power_panel_get_type (void);
++#if BUILD_PANEL_PRINTERS
+ extern GType cc_printers_panel_get_type (void);
++#endif /* BUILD_PANEL_PRINTERS */
+ extern GType cc_privacy_panel_get_type (void);
+ extern GType cc_search_panel_get_type (void);
+ extern GType cc_sharing_panel_get_type (void);
+@@ -103,7 +105,9 @@
+   PANEL_TYPE("notifications",    cc_notifications_panel_get_type,        NULL),
+   PANEL_TYPE("online-accounts",  cc_online_accounts_panel_get_type,      NULL),
+   PANEL_TYPE("power",            cc_power_panel_get_type,                NULL),
++#if BUILD_PANEL_PRINTERS
+   PANEL_TYPE("printers",         cc_printers_panel_get_type,             NULL),
++#endif /* BUILD_PANEL_PRINTERS */
+   PANEL_TYPE("privacy",          cc_privacy_panel_get_type,              NULL),
+   PANEL_TYPE("search",           cc_search_panel_get_type,               NULL),
+   PANEL_TYPE("sharing",          cc_sharing_panel_get_type,              cc_sharing_panel_static_init_func),
+--- a/tests/meson.build
++++ b/tests/meson.build
+@@ -12,5 +12,7 @@
+   subdir('interactive-panels')
+ endif
+ 
+-subdir('printers')
++if get_option('panel_profile') != 'santos'
++  subdir('printers')
++endif
+ subdir('keyboard')
+-- 
+2.39.2

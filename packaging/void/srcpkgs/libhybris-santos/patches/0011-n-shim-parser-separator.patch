@@ -1,0 +1,35 @@
+--- a/hybris/common/n/linker.cpp
++++ b/hybris/common/n/linker.cpp
+@@ -1333,11 +1333,29 @@
+ 
+ static void parse_shim_libs(const char* path) {
+   if (path != nullptr) {
+-    // We have historically supported ':' as well as ' ' in LD_SHIM_LIBS.
+-    for (const auto& pair : split(path, " :")) {
++    /*
++     * LD_SHIM_LIBS historically accepts ':' and space separators.
++     *
++     * The local split() helper advances by one byte regardless of
++     * separator length, so split(path, " :") leaves a leading ':'
++     * on every mapping after the first one. Normalize ':' to space
++     * and use the single-byte separator instead.
++     */
++    std::string normalized(path);
++    std::replace(normalized.begin(), normalized.end(), ':', ' ');
++
++    for (const auto& pair : split(normalized, " ")) {
+       size_t pos = pair.find('|');
+       if (pos > 0 && pos < pair.length() - 1) {
+-        auto desc = std::pair<std::string, std::string>(pair.substr(0, pos), pair.substr(pos + 1));
++        auto desc = std::pair<std::string, std::string>(
++            pair.substr(0, pos),
++            pair.substr(pos + 1));
++
++        fprintf(stderr,
++                "SANTOS_N_SHIM_MAP %s => %s\\n",
++                desc.first.c_str(),
++                desc.second.c_str());
++
+         g_ld_all_shim_libs.push_back(desc);
+       }
+     }

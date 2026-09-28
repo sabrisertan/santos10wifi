@@ -1,0 +1,4 @@
+#!/bin/sh
+set -u
+mkdir -p /var/log/gnome51-dev
+exec svlogd -tt /var/log/gnome51-dev

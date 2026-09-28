@@ -1,0 +1,31 @@
+#!/bin/sh
+# v5-aware TERM for gnome51-dev (L128 final lifecycle fix).
+# runsv passes the supervised outer PID as $1. Under v5 the outer is a
+# supervisor shell, NOT the session PGID leader (the session owns a
+# private group via session-inner.sh/setsid), so the old L120
+# `kill -TERM -$PID` hit a nonexistent group, exited 0, and suppressed
+# runsv's own TERM (the observed SIGCONT-only stops).
+# Signal the outer PID itself: its TERM trap forwards to the private
+# session group (5s KILL escalation lives in `run`). Return 0 once the
+# outer is gone so runsv sends no extra signal; non-zero lets runsv
+# fall back to its own signaling.
+set -u
+
+PID=${1-}
+case "$PID" in
+    ''|*[!0-9]*)
+        echo "control/t: invalid PID [$PID]" >&2
+        exit 1
+        ;;
+esac
+
+kill -TERM "$PID" 2>/dev/null || exit 0
+i=0
+while [ $i -lt 50 ]; do
+    if ! kill -0 "$PID" 2>/dev/null; then
+        exit 0
+    fi
+    sleep 0.2 2>/dev/null || sleep 1
+    i=$((i + 1))
+done
+exit 1

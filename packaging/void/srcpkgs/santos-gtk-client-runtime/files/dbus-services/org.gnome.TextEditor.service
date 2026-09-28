@@ -1,0 +1,3 @@
+[D-BUS Service]
+Name=org.gnome.TextEditor
+Exec=/usr/libexec/santos-client-environment --profile /etc/santos/gtk4-client.ini --exec /usr/bin/gnome-text-editor --gapplication-service

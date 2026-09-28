@@ -1,0 +1,120 @@
+--- a/video/out/opengl/context_wayland.c
++++ b/video/out/opengl/context_wayland.c
+@@ -16,6 +16,8 @@
+  * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
+  */
+ 
++#include <stdlib.h>
++#include <string.h>
+ #include <wayland-egl.h>
+ #include <EGL/egl.h>
+ #include <EGL/eglext.h>
+@@ -30,9 +32,11 @@
+ 
+ struct priv {
+     GL gl;
++    bool legacy_egl;
+     EGLDisplay egl_display;
+     EGLContext egl_context;
+     EGLSurface egl_surface;
++    EGLSurface probe_surface;
+     EGLConfig  egl_config;
+     struct wl_egl_window *egl_window;
+ };
+@@ -90,9 +94,16 @@
+     struct priv *p = ctx->priv = talloc_zero(ctx, struct priv);
+     struct vo_wayland_state *wl = ctx->vo->wl;
+ 
+-    if (!(p->egl_display = mpegl_get_display(EGL_PLATFORM_WAYLAND_EXT,
+-                                             "EGL_EXT_platform_wayland",
+-                                             wl->display)))
++    const char *legacy_env = getenv("SANTOS_WAYLAND_LEGACY_EGL");
++    bool legacy_egl = legacy_env && strcmp(legacy_env, "1") == 0;
++    p->legacy_egl = legacy_egl;
++    p->egl_display = mpegl_get_display(EGL_PLATFORM_WAYLAND_EXT,
++                                       "EGL_EXT_platform_wayland", wl->display);
++    if (!p->egl_display && legacy_egl) {
++        MP_INFO(ctx, "santos: using legacy Wayland EGL display\n");
++        p->egl_display = eglGetDisplay((EGLNativeDisplayType)wl->display);
++    }
++    if (!p->egl_display)
+         return false;
+ 
+     if (eglInitialize(p->egl_display, NULL, NULL) != EGL_TRUE)
+@@ -102,7 +113,20 @@
+                               &p->egl_config))
+         return false;
+ 
+-    eglMakeCurrent(p->egl_display, NULL, NULL, p->egl_context);
++    if (!eglMakeCurrent(p->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, p->egl_context)) {
++        if (!legacy_egl)
++            return false;
++        // SGX EGL 1.4 has no surfaceless context. Use a real pbuffer while
++        // querying GL, then release it once the Wayland window is current.
++        const EGLint attrs[] = {EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE};
++        p->probe_surface = eglCreatePbufferSurface(p->egl_display, p->egl_config, attrs);
++        if (!p->probe_surface || !eglMakeCurrent(p->egl_display, p->probe_surface,
++                                                p->probe_surface, p->egl_context)) {
++            MP_ERR(ctx, "santos: probe pbuffer failed: 0x%x\n", eglGetError());
++            return false;
++        }
++        MP_INFO(ctx, "santos: using probe pbuffer\n");
++    }
+ 
+     mpegl_load_functions(&p->gl, wl->log);
+ 
+@@ -137,6 +161,10 @@
+     }
+ 
+     eglMakeCurrent(p->egl_display, p->egl_surface, p->egl_surface, p->egl_context);
++    if (p->probe_surface) {
++        eglDestroySurface(p->egl_display, p->probe_surface);
++        p->probe_surface = EGL_NO_SURFACE;
++    }
+     // eglMakeCurrent may not configure the draw or read buffers if the context
+     // has been made current previously. On nvidia GL_NONE is bound because EGL_NO_SURFACE
+     // is used initially and we must bind the read and draw buffers here.
+@@ -166,6 +194,34 @@
+     struct priv *p = ctx->priv;
+ 
+     ra_gl_ctx_uninit(ctx);
++
++    if (p->legacy_egl) {
++        // Release EGL objects before wl_egl_window and before EGL thread state.
++        MP_VERBOSE(ctx, "santos: cleanup unbind\n");
++        eglMakeCurrent(p->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
++        if (p->egl_surface) {
++            MP_VERBOSE(ctx, "santos: cleanup surface\n");
++            eglDestroySurface(p->egl_display, p->egl_surface);
++        }
++        if (p->egl_window) {
++            MP_VERBOSE(ctx, "santos: cleanup native window\n");
++            wl_egl_window_destroy(p->egl_window);
++        }
++        if (p->probe_surface)
++            eglDestroySurface(p->egl_display, p->probe_surface);
++        if (p->egl_context) {
++            MP_VERBOSE(ctx, "santos: cleanup context\n");
++            eglDestroyContext(p->egl_display, p->egl_context);
++        }
++        MP_VERBOSE(ctx, "santos: cleanup display\n");
++        eglTerminate(p->egl_display);
++        MP_VERBOSE(ctx, "santos: cleanup thread\n");
++        eglReleaseThread();
++        MP_VERBOSE(ctx, "santos: cleanup wayland\n");
++        vo_wayland_uninit(ctx->vo);
++        MP_VERBOSE(ctx, "santos: cleanup done\n");
++        return;
++    }
+ 
+     if (p->egl_context) {
+         eglReleaseThread();
+@@ -176,6 +232,8 @@
+         eglDestroyContext(p->egl_display, p->egl_context);
+         p->egl_context = NULL;
+     }
++    if (p->probe_surface)
++        eglDestroySurface(p->egl_display, p->probe_surface);
+     eglTerminate(p->egl_display);
+ 
+     vo_wayland_uninit(ctx->vo);

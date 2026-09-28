@@ -1,0 +1,34 @@
+# Template file for 'pipeline-santos'
+pkgname=pipeline-santos
+version=4.1.0
+revision=4
+build_style=meson
+build_helper=rust
+# libmpv is intentionally private to this application; do not advertise the
+# bundled SONAME as a repository-wide provider.
+noshlibprovides=yes
+configure_args="-Dprofile=default -Dflatpak=false"
+hostmakedepends="cargo gettext glib-devel gtk4-devel libadwaita-devel meson ninja pkg-config blueprint-compiler desktop-file-utils"
+makedepends="mpv-santos-devel>=0.41.0_8 sqlite-devel"
+depends="gtk4 libadwaita mpv-santos>=0.41.0_8 pipewire santos-gtk-client-runtime webp-pixbuf-loader yt-dlp"
+short_desc="Pipeline-derived Santos YouTube player with embedded libmpv and VDX"
+maintainer="Santos10wifi project <santos10wifi@localhost>"
+license="GPL-3.0-or-later"
+homepage="https://gitlab.com/schmiddi-on-mobile/pipeline"
+distfiles="https://gitlab.com/schmiddi-on-mobile/pipeline/-/archive/${version}/pipeline-${version}.tar.gz"
+checksum="277779a350be719bf0758d7fa4c26899b2f669fd72a6cbc65fa3f48b61d9edd2"
+
+# The package deliberately keeps the upstream application ID and GSettings
+# schema: the existing Pipeline subscriptions/history remain usable while the
+# executable and desktop entry are named for the Santos product.
+post_install() {
+	install -d "$DESTDIR/usr/lib/pipeline-santos"
+	install -m755 /usr/lib/libmpv.so.2.5.0 \
+		"$DESTDIR/usr/lib/pipeline-santos/libmpv.so.2.5.0"
+	ln -sf libmpv.so.2.5.0 "$DESTDIR/usr/lib/pipeline-santos/libmpv.so.2"
+	ln -sf tubefeeder "$DESTDIR/usr/bin/pipeline-santos"
+	rm -f "$DESTDIR/usr/share/applications/de.schmidhuberj.tubefeeder.desktop"
+	install -Dm644 "$FILESDIR/santos-pipeline.desktop" \
+		"$DESTDIR/usr/share/applications/santos-pipeline.desktop"
+	vlicense LICENSE
+}

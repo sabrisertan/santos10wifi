@@ -1,0 +1,317 @@
+--- a/hybris/egl/platforms/common/eglplatformcommon.cpp
++++ b/hybris/egl/platforms/common/eglplatformcommon.cpp
+@@ -75,7 +75,8 @@
+ 
+ extern "C" EGLBoolean eglplatformcommon_eglBindWaylandDisplayWL(EGLDisplay dpy, struct wl_display *display)
+ {
+-	server_wlegl_create(display);
++	if (!server_wlegl_create(display))
++		return EGL_FALSE;
+ 	return EGL_TRUE;
+ }
+ 
+@@ -87,7 +88,13 @@
+ extern "C" EGLBoolean eglplatformcommon_eglQueryWaylandBufferWL(EGLDisplay dpy,
+ 	struct wl_resource *buffer, EGLint attribute, EGLint *value)
+ {
++	if (!buffer || !value)
++		return EGL_FALSE;
++
+ 	server_wlegl_buffer *buf  = server_wlegl_buffer_from(buffer);
++	if (!buf || !buf->buf)
++		return EGL_FALSE;
++
+ 	ANativeWindowBuffer* anwb = (ANativeWindowBuffer *) buf->buf;
+ 
+ 	if (attribute == EGL_TEXTURE_FORMAT) {
+@@ -121,11 +128,12 @@
+  {
+      if (!buffer)
+          return EGL_FALSE;
++    *buffer = 0;
+     server_wlegl_buffer *buf  = server_wlegl_buffer_from(wlBuffer);
+-    if (!buf->buf->isAllocated()) {
++    if (!buf || !buf->buf || !buf->buf->isAllocated()) {
+         // We only return the handles from buffers which are allocated server side. This is because some
+         // hardware compositors have problems with client-side allocated buffers.
+-        buffer = 0;
++        *buffer = 0;
+         return EGL_FALSE;
+     }
+     ANativeWindowBuffer* anwb = (ANativeWindowBuffer *) buf->buf;
+@@ -198,7 +206,10 @@
+ 		return EGL_TRUE;
+ 	}
+ 	else
++	{
++		*buffer = 0;
+ 		return EGL_FALSE;
++	}
+ }
+ 
+ extern "C" EGLBoolean eglplatformcommon_eglHybrisLockNativeBuffer(EGLClientBuffer buffer, EGLint usage, EGLint l, EGLint t, EGLint w, EGLint h, void **vaddr)
+@@ -243,7 +254,11 @@
+ 	static int debugenvchecked = 0;
+ 	if (*target == EGL_WAYLAND_BUFFER_WL)
+ 	{
++		if (!buffer || !*buffer)
++			return;
+ 		server_wlegl_buffer *buf = server_wlegl_buffer_from((struct wl_resource *)*buffer);
++		if (!buf || !buf->buf)
++			return;
+ 		HYBRIS_TRACE_BEGIN("eglplatformcommon", "Wayland_eglImageKHR", "-resource@%i", wl_resource_get_id((struct wl_resource *)*buffer));
+ 		HYBRIS_TRACE_END("eglplatformcommon", "Wayland_eglImageKHR", "-resource@%i", wl_resource_get_id((struct wl_resource *)*buffer));
+ 		if (debugenvchecked == 0)
+@@ -336,7 +351,9 @@
+ 	{
+ 		const char *ret = (*real_eglQueryString)(dpy, name);
+ 		static char eglextensionsbuf[1024];
+-		snprintf(eglextensionsbuf, 1022, "%sEGL_HYBRIS_native_buffer2 EGL_HYBRIS_WL_acquire_native_buffer %s", ret ? ret : "",
++		snprintf(eglextensionsbuf, 1022, "%s%sEGL_HYBRIS_native_buffer2 EGL_HYBRIS_WL_acquire_native_buffer %s",
++			ret ? ret : "",
++			(ret && strlen(ret) > 0 && ret[strlen(ret)-1] != ' ') ? " " : "",
+ #ifdef WANT_WAYLAND
+ 			"EGL_WL_bind_wayland_display "
+ #else
+--- a/hybris/egl/platforms/common/server_wlegl_buffer.cpp
++++ b/hybris/egl/platforms/common/server_wlegl_buffer.cpp
+@@ -23,6 +23,7 @@
+ #include <android-config.h>
+ #include <cstring>
+ #include <cassert>
++#include <new>
+ 
+ #include "server_wlegl_buffer.h"
+ #include "server_wlegl_private.h"
+@@ -42,6 +43,10 @@
+ server_wlegl_buffer *
+ server_wlegl_buffer_from(struct wl_resource *buffer)
+ {
++	if (!buffer)
++		return NULL;
++	if (!wl_resource_instance_of(buffer, &wl_buffer_interface, &server_wlegl_buffer_impl))
++		return NULL;
+ 	return static_cast<server_wlegl_buffer *>(wl_resource_get_user_data(buffer));
+ }
+ 
+@@ -49,7 +54,11 @@
+ server_wlegl_buffer_dtor(struct wl_resource *resource)
+ {
+ 	server_wlegl_buffer *buffer = server_wlegl_buffer_from(resource);
+-	buffer->buf->common.decRef(&buffer->buf->common);
++
++	/* L59 defense in depth: the destructor is registered only once
++	 * ->buf is valid, but never dereference an unset buffer. */
++	if (buffer && buffer->buf)
++		buffer->buf->common.decRef(&buffer->buf->common);
+ 	delete buffer;
+ }
+ 
+@@ -83,6 +92,16 @@
+ 	return buffer;
+ }
+ 
++/*
++ * Create a wl_buffer for a server-side gralloc allocation.
++ *
++ * Ownership (L59 policy P1): this function takes ownership of `handle`, which
++ * was allocated with hybris_gralloc_allocate() and therefore is released with
++ * hybris_gralloc_release(handle, 1).  On success the returned object owns the
++ * allocation and its wl_buffer resource destructor is the single release edge.
++ * On failure NULL is returned after the allocation has been released exactly
++ * once; the caller must not touch `handle` after this call on any path.
++ */
+ server_wlegl_buffer *
+ server_wlegl_buffer_create_server(wl_client *client,
+ 			   int32_t width,
+@@ -93,16 +112,39 @@
+ 			   buffer_handle_t handle,
+ 			   server_wlegl *wlegl)
+ {
+-	server_wlegl_buffer *buffer = new server_wlegl_buffer;
++	/* L59 F3.1: recoverable allocation; on failure release the handle once. */
++	server_wlegl_buffer *buffer = new (std::nothrow) server_wlegl_buffer;
++	if (!buffer) {
++		hybris_gralloc_release(handle, 1);
++		return NULL;
++	}
+ 
+ 	buffer->wlegl = wlegl;
+-	buffer->resource = wl_resource_create(client, &wl_buffer_interface, 1, 0);
+-	wl_resource_set_implementation(buffer->resource, &server_wlegl_buffer_impl, buffer, server_wlegl_buffer_dtor);
++	buffer->buf = NULL;
++	buffer->resource = NULL;
+ 
+-	buffer->buf = new RemoteWindowBuffer(
++	RemoteWindowBuffer *buf = new (std::nothrow) RemoteWindowBuffer(
+ 	        width, height, stride, format, usage, handle);
+-	buffer->buf->setAllocated(true);
+-	buffer->buf->common.incRef(&buffer->buf->common);
++	if (!buf) {
++		/* L59 F3.2: no resource or destructor is registered yet. */
++		delete buffer;
++		hybris_gralloc_release(handle, 1);
++		return NULL;
++	}
++	buf->setAllocated(true);
++	buf->common.incRef(&buf->common);
++	buffer->buf = buf;
++
++	buffer->resource = wl_resource_create(client, &wl_buffer_interface, 1, 0);
++	if (!buffer->resource) {
++		/* L59 F3.3: release through the wrapper's single reference. */
++		buf->common.decRef(&buf->common);
++		delete buffer;
++		return NULL;
++	}
++
++	/* Register the destructor only once buffer->buf is valid. */
++	wl_resource_set_implementation(buffer->resource, &server_wlegl_buffer_impl, buffer, server_wlegl_buffer_dtor);
+ 	return buffer;
+ }
+ 
+--- a/hybris/egl/platforms/common/server_wlegl.cpp
++++ b/hybris/egl/platforms/common/server_wlegl.cpp
+@@ -21,6 +21,8 @@
+  */
+ 
+ #include <android-config.h>
++#include <cerrno>
++#include <new>
+ #include <cstring>
+ 
+ #include <EGL/egl.h>
+@@ -116,30 +118,75 @@
+ static void
+ server_wlegl_get_server_buffer_handle(wl_client *client, wl_resource *res, uint32_t id, int32_t width, int32_t height, int32_t format, int32_t usage)
+ {
+-	if (width == 0 || height == 0) {
+-		wl_resource_post_error(res, 0, "invalid buffer size: %u,%u\n", width, height);
++	/* L59 F5: invalid dimensions are a bad value, not a bad handle. */
++	if (width <= 0 || height <= 0) {
++		wl_resource_post_error(res, ANDROID_WLEGL_ERROR_BAD_VALUE,
++				       "invalid buffer size: %d,%d\n", width, height);
+ 		return;
+ 	}
+ 
+ 	server_wlegl *wlegl = server_wlegl_from(res);
+ 
++	/*
++	 * L59 F1: wl_resource_create() does not post an error on allocation
++	 * failure.  Disconnect the client instead of continuing with a NULL
++	 * resource (the client would otherwise wait for the one-shot events).
++	 */
+ 	wl_resource *resource = wl_resource_create(client, &android_wlegl_server_buffer_handle_interface, wl_resource_get_version(res), id);
++	if (!resource) {
++		wl_client_post_no_memory(client);
++		return;
++	}
+ 
+-	buffer_handle_t _handle;
+-	int _stride;
++	buffer_handle_t _handle = NULL;
++	int _stride = 0;
+ 
+ 	usage |= GRALLOC_USAGE_HW_COMPOSER;
+ 
++	/*
++	 * L59 F2: stop immediately on allocation failure.  The vendor gralloc
++	 * leaves the output handle untouched on failure and frees any partial
++	 * handle internally, so a failed handle must never be released here.
++	 */
+ 	int r = hybris_gralloc_allocate(width, height, format, usage, &_handle, (uint32_t*)&_stride);
+-        if (r) {
+-            HYBRIS_ERROR_LOG(SERVER_WLEGL, "failed to allocate buffer\n");
+-        }
++	if (r != 0 || _handle == NULL) {
++		HYBRIS_ERROR_LOG(SERVER_WLEGL, "failed to allocate buffer (error %d)", r);
++		if (r == -ENOMEM)
++			wl_client_post_no_memory(client);
++		else
++			wl_resource_post_error(res, ANDROID_WLEGL_ERROR_BAD_HANDLE,
++					       "server buffer allocation failed (%d)", r);
++		return;
++	}
++
++	/*
++	 * L59 F3: the helper takes ownership of _handle and releases it exactly
++	 * once on failure; on success the wl_buffer resource destructor owns it.
++	 * The caller must not touch _handle after this call.
++	 */
+ 	server_wlegl_buffer *buffer = server_wlegl_buffer_create_server(client, width, height, _stride, format, usage, _handle, wlegl);
++	if (!buffer) {
++		wl_client_post_no_memory(client);
++		return;
++	}
+ 
+ 	struct wl_array ints;
+ 	int *ints_data;
+ 	wl_array_init(&ints);
+ 	ints_data = (int*) wl_array_add(&ints, _handle->numInts * sizeof(int));
++	if (!ints_data) {
++		/*
++		 * L59 F4: release the ints array, then destroy the wl_buffer
++		 * resource (its destructor is the single release edge for the
++		 * allocation), then disconnect the client.  The new_id was
++		 * never sent, so no client-side proxy exists for this
++		 * server-side id.
++		 */
++		wl_array_release(&ints);
++		wl_resource_destroy(buffer->resource);
++		wl_client_post_no_memory(client);
++		return;
++	}
+ 	memcpy(ints_data, _handle->data + _handle->numFds, _handle->numInts * sizeof(int));
+ 
+ 	android_wlegl_server_buffer_handle_send_buffer_ints(resource, &ints);
+@@ -167,19 +214,38 @@
+ 	struct wl_resource *resource;
+ 
+ 	resource = wl_resource_create(client, &android_wlegl_interface, version, id);
++	if (!resource) {
++		/* L62: wl_resource_create() does not post an error for
++		 * allocation failures; disconnect the client instead of
++		 * dereferencing NULL in wl_resource_set_implementation(). */
++		wl_client_post_no_memory(client);
++		return;
++	}
+ 	wl_resource_set_implementation(resource, &server_wlegl_impl, wlegl, 0);
+ }
+ 
+ server_wlegl *
+ server_wlegl_create(struct wl_display *display)
+ {
++	if (!display)
++		return NULL;
++
+ 	struct server_wlegl *wlegl;
+ 
+-	wlegl = new server_wlegl;
++	/* L62: bounded creation; no exception may escape the EGL entry point. */
++	wlegl = new (std::nothrow) server_wlegl;
++	if (!wlegl)
++		return NULL;
+ 
+ 	wlegl->display = display;
+ 	wlegl->global = wl_global_create(display, &android_wlegl_interface, 2,
+ 					      wlegl, server_wlegl_bind);
++	if (!wlegl->global) {
++		/* L62: no half-installed global; clean up the object and
++		 * report failure to eglBindWaylandDisplayWL(). */
++		delete wlegl;
++		return NULL;
++	}
+ 
+ 	return wlegl;
+ }
+--- a/hybris/egl/platforms/wayland/eglplatform_wayland.cpp
++++ b/hybris/egl/platforms/wayland/eglplatform_wayland.cpp
+@@ -251,6 +251,8 @@
+ 	if (img->target == EGL_WAYLAND_BUFFER_WL) {
+ 		WaylandDisplay *wdpy = (WaylandDisplay *)_hybris_egl_display_get_mapping(dpy);
+ 		server_wlegl_buffer *buf = server_wlegl_buffer_from((wl_resource *)img->egl_buffer);
++		if (!buf || !buf->buf)
++			return NULL;
+ 		WaylandNativeWindowBuffer wnb(buf->buf);
+ 		// The buffer will be managed by the app, so pass NULL as the queue so that
+ 		// it will be assigned to the default queue

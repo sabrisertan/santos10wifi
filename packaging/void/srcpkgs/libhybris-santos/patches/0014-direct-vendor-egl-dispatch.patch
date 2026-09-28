@@ -1,0 +1,117 @@
+--- a/hybris/common/n/linker.cpp
++++ b/hybris/common/n/linker.cpp
+@@ -4579,10 +4579,8 @@
+ #endif
+ 
+   // Use LD_LIBRARY_PATH and LD_PRELOAD (but only if we aren't setuid/setgid).
+-  if (DEFAULT_HYBRIS_LD_LIBRARY_PATH)
+-    parse_LD_LIBRARY_PATH(DEFAULT_HYBRIS_LD_LIBRARY_PATH);
+-  else
+-    parse_LD_LIBRARY_PATH(ldpath_env);
++  // An explicit per-process path must override the configured fallback.
++  parse_LD_LIBRARY_PATH(ldpath_env ? ldpath_env : DEFAULT_HYBRIS_LD_LIBRARY_PATH);
+   parse_LD_PRELOAD(ldpreload_env);
+   parse_LD_SHIM_LIBS(ldshim_libs_env);
+ 
+@@ -4739,10 +4737,8 @@
+     ldshim_libs_env = getenv("LD_SHIM_LIBS");
+   }
+ 
+-  if (DEFAULT_HYBRIS_LD_LIBRARY_PATH)
+-    parse_LD_LIBRARY_PATH(DEFAULT_HYBRIS_LD_LIBRARY_PATH);
+-  else
+-    parse_LD_LIBRARY_PATH(ldpath_env);
++  // An explicit per-process path must override the configured fallback.
++  parse_LD_LIBRARY_PATH(ldpath_env ? ldpath_env : DEFAULT_HYBRIS_LD_LIBRARY_PATH);
+   parse_LD_PRELOAD(ldpreload_env);
+ 
+   /*
+--- a/hybris/common/n/dlfcn.cpp
++++ b/hybris/common/n/dlfcn.cpp
+@@ -75,12 +75,12 @@
+   return old_value;
+ }
+ 
+-void android_get_LD_LIBRARY_PATH(char* buffer, size_t buffer_size) {
++extern "C" void android_get_LD_LIBRARY_PATH(char* buffer, size_t buffer_size) {
+   ScopedPthreadMutexLocker locker(&g_dl_mutex);
+   do_android_get_LD_LIBRARY_PATH(buffer, buffer_size);
+ }
+ 
+-void android_update_LD_LIBRARY_PATH(const char* ld_library_path) {
++extern "C" void android_update_LD_LIBRARY_PATH(const char* ld_library_path) {
+   ScopedPthreadMutexLocker locker(&g_dl_mutex);
+   do_android_update_LD_LIBRARY_PATH(ld_library_path);
+ }
+--- a/hybris/egl/egl.c
++++ b/hybris/egl/egl.c
+@@ -362,9 +362,23 @@
+ HYBRIS_IMPLEMENT_FUNCTION3(egl, EGLBoolean, eglCopyBuffers, EGLDisplay, EGLSurface, EGLNativePixmapType);
+ 
+ 
++/* Vendor EGL exposes extension entry points through eglGetProcAddress,
++ * even when they are absent from its dynamic symbol table. */
++static void *hybris_resolve_egl_extension(const char *name)
++{
++    HYBRIS_DLSYSM(egl, &_eglGetProcAddress, "eglGetProcAddress");
++    return _eglGetProcAddress ? (void *)_eglGetProcAddress(name) : NULL;
++}
++
+ static EGLImageKHR _my_eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, EGLenum target, EGLClientBuffer buffer, const EGLint *attrib_list)
+ {
+ 	HYBRIS_DLSYSM(egl, &_eglCreateImageKHR, "eglCreateImageKHR");
++    if (!_eglCreateImageKHR)
++        _eglCreateImageKHR = (__typeof__(_eglCreateImageKHR))hybris_resolve_egl_extension("eglCreateImageKHR");
++    if (!_eglCreateImageKHR) {
++        HYBRIS_ERROR("Missing EGL extension: eglCreateImageKHR");
++        return EGL_NO_IMAGE_KHR;
++    }
+ 	EGLContext newctx = ctx;
+ 	EGLenum newtarget = target;
+ 	EGLClientBuffer newbuffer = buffer;
+@@ -390,6 +404,12 @@
+ static void _my_glEGLImageTargetTexture2DOES(GLenum target, GLeglImageOES image)
+ {
+ 	HYBRIS_DLSYSM(glesv2, &_glEGLImageTargetTexture2DOES, "glEGLImageTargetTexture2DOES");
++    if (!_glEGLImageTargetTexture2DOES)
++        _glEGLImageTargetTexture2DOES = (__typeof__(_glEGLImageTargetTexture2DOES))hybris_resolve_egl_extension("glEGLImageTargetTexture2DOES");
++    if (!_glEGLImageTargetTexture2DOES) {
++        HYBRIS_ERROR("Missing EGL extension: glEGLImageTargetTexture2DOES");
++        return ;
++    }
+ 	struct egl_image *img = image;
+ 	(*_glEGLImageTargetTexture2DOES)(target, img ? img->egl_image : NULL);
+ }
+@@ -451,6 +471,12 @@
+ EGLBoolean eglDestroyImageKHR(EGLDisplay dpy, EGLImageKHR image)
+ {
+ 	HYBRIS_DLSYSM(egl, &_eglDestroyImageKHR, "eglDestroyImageKHR");
++    if (!_eglDestroyImageKHR)
++        _eglDestroyImageKHR = (__typeof__(_eglDestroyImageKHR))hybris_resolve_egl_extension("eglDestroyImageKHR");
++    if (!_eglDestroyImageKHR) {
++        HYBRIS_ERROR("Missing EGL extension: eglDestroyImageKHR");
++        return EGL_FALSE;
++    }
+ 	struct egl_image *img = image;
+ 	EGLBoolean ret = (*_eglDestroyImageKHR)(dpy, img ? img->egl_image : NULL);
+ 	if (ret == EGL_TRUE) {
+--- a/hybris/glesv2/glesv2.c
++++ b/hybris/glesv2/glesv2.c
+@@ -1046,6 +1046,17 @@
+ 
+ void glEGLImageTargetTexture2DOES (GLenum target, GLeglImageOES image)
+ {
++       if (!_glEGLImageTargetTexture2DOES) {
++           void *egl = android_dlopen(getenv("LIBEGL") ? getenv("LIBEGL") : "libEGL.so", RTLD_NOW);
++           __eglMustCastToProperFunctionPointerType (*get_proc)(const char *) = egl ?
++               (void *)android_dlsym(egl, "eglGetProcAddress") : NULL;
++           if (get_proc)
++               _glEGLImageTargetTexture2DOES = (void *)get_proc("glEGLImageTargetTexture2DOES");
++       }
++       if (!_glEGLImageTargetTexture2DOES) {
++           fprintf(stderr, "libhybris: missing glEGLImageTargetTexture2DOES\n");
++           return;
++       }
+        struct egl_image *img = image;
+        (*_glEGLImageTargetTexture2DOES)(target, img ? img->egl_image : NULL);
+ }

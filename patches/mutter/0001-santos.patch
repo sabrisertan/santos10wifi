@@ -1,0 +1,4216 @@
+diff --git a/.gitignore b/.gitignore
+index 07adfd1ccfa7ffa6259745ba970f52355ae7cc27..387d11067ed62cc33309108792d7e2a4d5818a30 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -11,3 +11,4 @@ runtime-dir
+ build
+ _build
+ builddir
++.serena/
+diff --git a/cogl/cogl/cogl-renderer-egl.c b/cogl/cogl/cogl-renderer-egl.c
+index be82bda56564afa0c13c9466ecda0727ac04c732..432857821172b27b5b82fdb1196511be7353da7b 100644
+--- a/cogl/cogl/cogl-renderer-egl.c
++++ b/cogl/cogl/cogl-renderer-egl.c
+@@ -225,6 +225,9 @@ cogl_renderer_egl_load_driver (CoglRenderer  *renderer,
+   const char *libgl_name = NULL;
+   CoglDriver *driver = NULL;
+   EGLContext test_context;
++  EGLConfig test_config = EGL_NO_CONFIG_KHR;
++  EGLint config_attribs[5];
++  EGLint num_configs = 0;
+   EGLint attribs[7];
+ 
+ #ifdef HAVE_GL
+@@ -281,8 +284,36 @@ cogl_renderer_egl_load_driver (CoglRenderer  *renderer,
+       attribs[2] = EGL_NONE;
+     }
+ 
++  /* EGL_KHR_no_config_context is optional. Older vendor EGL
++   * implementations require a real EGLConfig even for this temporary
++   * driver-probe context. */
++  if (priv->needs_config)
++    {
++      config_attribs[0] = EGL_RENDERABLE_TYPE;
++      config_attribs[1] = driver_id == COGL_DRIVER_ID_GL3
++                        ? EGL_OPENGL_BIT
++                        : EGL_OPENGL_ES2_BIT;
++      config_attribs[2] = EGL_NONE;
++
++      if (!eglChooseConfig (priv->edisplay,
++                            config_attribs,
++                            &test_config,
++                            1,
++                            &num_configs) ||
++          num_configs < 1)
++        {
++          g_object_unref (driver);
++          g_clear_pointer (&priv->libgl_module, g_module_close);
++          g_set_error (error, COGL_DRIVER_ERROR,
++                       COGL_DRIVER_ERROR_FAILED_TO_LOAD_LIBRARY,
++                       "Failed to choose an EGLConfig for driver \"%s\"",
++                       libgl_name);
++          return FALSE;
++        }
++    }
++
+   test_context = eglCreateContext (priv->edisplay,
+-                                   EGL_NO_CONFIG_KHR,
++                                   test_config,
+                                    EGL_NO_CONTEXT,
+                                    attribs);
+   if (test_context == EGL_NO_CONTEXT)
+@@ -337,6 +368,7 @@ cogl_renderer_egl_init_extensions (CoglRenderer *renderer)
+   COGL_NOTE (WINSYS, "  EGL Extensions: %s", egl_extensions);
+ 
+   priv->private_features = 0;
++  priv->needs_config = TRUE;
+ 
+   if (cogl_check_extension ("EGL_NOK_swap_region", split_extensions))
+     {
+@@ -362,7 +394,10 @@ cogl_renderer_egl_init_extensions (CoglRenderer *renderer)
+     priv->private_features |= COGL_EGL_WINSYS_FEATURE_CREATE_CONTEXT;
+ 
+   if (cogl_check_extension ("EGL_KHR_no_config_context", split_extensions))
+-    priv->private_features |= COGL_EGL_WINSYS_FEATURE_NO_CONFIG_CONTEXT;
++    {
++      priv->private_features |= COGL_EGL_WINSYS_FEATURE_NO_CONFIG_CONTEXT;
++      priv->needs_config = FALSE;
++    }
+ 
+   if (cogl_check_extension ("EGL_EXT_buffer_age", split_extensions))
+     priv->private_features |= COGL_EGL_WINSYS_FEATURE_BUFFER_AGE;
+@@ -429,11 +464,17 @@ cogl_renderer_egl_detect_hardware_rendering (CoglRendererEGL *renderer_egl)
+     EGL_CONTEXT_CLIENT_VERSION, 2,
+     EGL_NONE
+   };
++  static const EGLint config_attribs[] = {
++    EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
++    EGL_NONE,
++  };
++  EGLConfig config = EGL_NO_CONFIG_KHR;
+   EGLContext egl_context;
+   EGLDisplay prev_display;
+   EGLSurface prev_draw, prev_read;
+   EGLContext prev_context;
+   const char *renderer_str;
++  g_autoptr (GError) error = NULL;
+ 
+   prev_display = eglGetCurrentDisplay ();
+   prev_draw = eglGetCurrentSurface (EGL_DRAW);
+@@ -442,10 +483,15 @@ cogl_renderer_egl_detect_hardware_rendering (CoglRendererEGL *renderer_egl)
+ 
+   eglBindAPI (EGL_OPENGL_ES_API);
+ 
+-  egl_context = eglCreateContext (priv->edisplay,
+-                                  EGL_NO_CONFIG_KHR,
+-                                  EGL_NO_CONTEXT,
+-                                  attributes);
++  if (priv->needs_config &&
++      !cogl_renderer_egl_choose_first_config (renderer_egl,
++                                              config_attribs,
++                                              &config,
++                                              &error))
++    return;
++
++  egl_context = eglCreateContext (priv->edisplay, config,
++                                  EGL_NO_CONTEXT, attributes);
+   if (egl_context == EGL_NO_CONTEXT)
+     return;
+ 
+diff --git a/src/backends/meta-backend-private.h b/src/backends/meta-backend-private.h
+index 3512df64e1ed44d871d957246f2e82cddd2214ad..374610b4319636abc2001312ad0f42e6cacf4324 100644
+--- a/src/backends/meta-backend-private.h
++++ b/src/backends/meta-backend-private.h
+@@ -80,7 +80,10 @@ struct _MetaBackendClass
+   MetaBackendCapabilities (* get_capabilities) (MetaBackend *backend);
+ 
+   MetaCursorRenderer * (* get_cursor_renderer) (MetaBackend   *backend,
+-                                                ClutterSprite *sprite);
++                                                 ClutterSprite *sprite);
++
++  void (* remove_cursor_renderer) (MetaBackend   *backend,
++                                   ClutterSprite *sprite);
+ 
+   MetaInputSettings * (* get_input_settings) (MetaBackend *backend);
+ 
+@@ -135,6 +138,8 @@ MetaUdev * meta_backend_get_udev (MetaBackend *backend);
+ 
+ MetaCursorRenderer * meta_backend_get_cursor_renderer_for_sprite (MetaBackend   *backend,
+                                                                   ClutterSprite *sprite);
++void meta_backend_remove_cursor_renderer_for_sprite (MetaBackend   *backend,
++                                                     ClutterSprite *sprite);
+ META_EXPORT_TEST
+ MetaCursorRenderer * meta_backend_get_cursor_renderer (MetaBackend *backend);
+ META_EXPORT_TEST
+diff --git a/src/backends/meta-backend.c b/src/backends/meta-backend.c
+index e6571aef9df3c3b8013a562c0d5cb67c9c259df4..efe8269f1de5cbf1403422191e2ee97432ae7403 100644
+--- a/src/backends/meta-backend.c
++++ b/src/backends/meta-backend.c
+@@ -1555,6 +1555,22 @@ meta_backend_get_cursor_renderer_for_sprite (MetaBackend   *backend,
+                                                                 sprite);
+ }
+ 
++void
++meta_backend_remove_cursor_renderer_for_sprite (MetaBackend   *backend,
++                                                ClutterSprite *sprite)
++{
++  MetaBackendClass *backend_class;
++
++  g_return_if_fail (META_IS_BACKEND (backend));
++
++  if (!sprite)
++    return;
++
++  backend_class = META_BACKEND_GET_CLASS (backend);
++  if (backend_class->remove_cursor_renderer)
++    backend_class->remove_cursor_renderer (backend, sprite);
++}
++
+ MetaRenderer *
+ meta_backend_get_renderer (MetaBackend *backend)
+ {
+diff --git a/src/backends/meta-backlight-sysfs.c b/src/backends/meta-backlight-sysfs.c
+index 22050e4fac06849247a29005b9e8462234073465..202727cb220a0c4d2e12f747a53e829d64e1e142 100644
+--- a/src/backends/meta-backlight-sysfs.c
++++ b/src/backends/meta-backlight-sysfs.c
+@@ -19,6 +19,11 @@
+ 
+ #include "backends/meta-backlight-sysfs-private.h"
+ 
++#include <errno.h>
++#include <fcntl.h>
++#include <string.h>
++#include <unistd.h>
++
+ #include <glib.h>
+ 
+ #include "backends/meta-backend-private.h"
+@@ -158,10 +163,42 @@ meta_backlight_sysfs_set_brightness (MetaBacklight       *backlight,
+ {
+   MetaBacklightSysfs *backlight_sysfs = META_BACKLIGHT_SYSFS (backlight);
+   g_autoptr (GTask) task = NULL;
++  g_autofree char *brightness_str = NULL;
++  int brightness_fd;
+ 
+   task = g_task_new (backlight_sysfs, cancellable, callback, user_data);
+   g_task_set_task_data (task, GINT_TO_POINTER (brightness_target), NULL);
+ 
++  /* Santos product session: no logind session exists by design, so the
++   * pkexec helper below can never authorize. The panel brightness node
++   * is group-writable (video), so write directly when permitted and
++   * keep the helper only as a fallback. NOTE: plain open/write, never
++   * g_file_set_contents (its temp-file+rename cannot work on sysfs).
++   */
++  brightness_str = g_strdup_printf ("%d", brightness_target);
++  brightness_fd = open (backlight_sysfs->brightness_path,
++                        O_WRONLY | O_CLOEXEC);
++  if (brightness_fd >= 0)
++    {
++      ssize_t wrote = write (brightness_fd, brightness_str,
++                             strlen (brightness_str));
++      close (brightness_fd);
++      if (wrote == (ssize_t) strlen (brightness_str))
++        {
++          g_task_return_int (task, brightness_target);
++          return;
++        }
++      g_warning ("Backlight %s: direct sysfs write of %d to %s short/failed",
++                 meta_backlight_get_name (META_BACKLIGHT (backlight)),
++                 brightness_target, backlight_sysfs->brightness_path);
++    }
++  else
++    {
++      g_warning ("Backlight %s: direct sysfs open of %s failed: %s",
++                 meta_backlight_get_name (META_BACKLIGHT (backlight)),
++                 backlight_sysfs->brightness_path, g_strerror (errno));
++    }
++
+   if (backlight_sysfs->session_proxy)
+     {
+       meta_dbus_login1_session_call_set_brightness (backlight_sysfs->session_proxy,
+diff --git a/src/backends/meta-sprite.c b/src/backends/meta-sprite.c
+index 2953ac4cf200e3ff83be53ebd63d2f71cee2355b..2b23e516b74d7e298e3008689d02866a109d55c5 100644
+--- a/src/backends/meta-sprite.c
++++ b/src/backends/meta-sprite.c
+@@ -97,7 +97,12 @@ meta_sprite_update_cursor (ClutterSprite *sprite,
+   MetaCursorRenderer *cursor_renderer;
+ 
+   if (!clutter_focus_get_current_actor (CLUTTER_FOCUS (sprite)))
+-    return;
++    {
++      /* A Santos base renderer is owned by the backend per sprite, so clear
++       * it even when focus loss means there is no cursor to update. */
++      meta_backend_remove_cursor_renderer_for_sprite (priv->backend, sprite);
++      return;
++    }
+ 
+   cursor_renderer = meta_backend_get_cursor_renderer_for_sprite (priv->backend,
+                                                                  sprite);
+diff --git a/src/backends/native/meta-backend-native.c b/src/backends/native/meta-backend-native.c
+index 7a666255ada9358d1559d866d155c8ac5b0c3e3d..af0dd3754b454b401d771206128998499232fa57 100644
+--- a/src/backends/native/meta-backend-native.c
++++ b/src/backends/native/meta-backend-native.c
+@@ -769,7 +769,7 @@ meta_backend_native_init_basic (MetaBackend  *backend,
+     g_hash_table_new_full (g_str_hash, g_str_equal,
+                            g_free, g_object_unref);
+ 
+-  priv->device_pool = meta_device_pool_new (native);
++  priv->device_pool = meta_device_pool_new (backend);
+ 
+   kms_flags = META_KMS_FLAG_NONE;
+   if (meta_backend_is_headless (backend))
+diff --git a/src/backends/native/meta-device-pool-private.h b/src/backends/native/meta-device-pool-private.h
+index 062e043c77c4859b45fced7832686645080b94af..c0823003de3b7ba144838d5ec7e40e2c4097a092 100644
+--- a/src/backends/native/meta-device-pool-private.h
++++ b/src/backends/native/meta-device-pool-private.h
+@@ -19,7 +19,7 @@
+ 
+ #include <glib-object.h>
+ 
+-#include "backends/native/meta-backend-native-types.h"
++#include "backends/meta-backend-types.h"
+ #include "backends/native/meta-device-pool.h"
+ 
+ #define META_TYPE_DEVICE_POOL (meta_device_pool_get_type ())
+@@ -27,4 +27,4 @@ G_DECLARE_FINAL_TYPE (MetaDevicePool, meta_device_pool,
+                       META, DEVICE_POOL,
+                       GObject)
+ 
+-MetaDevicePool * meta_device_pool_new (MetaBackendNative *backend_native);
++MetaDevicePool * meta_device_pool_new (MetaBackend *backend);
+diff --git a/src/backends/native/meta-device-pool.c b/src/backends/native/meta-device-pool.c
+index 33bbbf88753fd52684073be5d3dea4d63f66f1c2..f4990c63fd27fcf5aaf04b068ebccf18f125874c 100644
+--- a/src/backends/native/meta-device-pool.c
++++ b/src/backends/native/meta-device-pool.c
+@@ -25,8 +25,8 @@
+ #include <sys/sysmacros.h>
+ #include <sys/types.h>
+ 
++#include "backends/meta-backend-private.h"
+ #include "backends/meta-launcher.h"
+-#include "backends/native/meta-backend-native.h"
+ #include "meta/meta-backend.h"
+ #include "meta/util.h"
+ 
+@@ -359,14 +359,14 @@ release_device_file (MetaDevicePool *pool,
+ }
+ 
+ MetaDevicePool *
+-meta_device_pool_new (MetaBackendNative *backend_native)
++meta_device_pool_new (MetaBackend *backend)
+ {
+   MetaDevicePool *pool;
+   MetaLauncher *launcher;
+ 
+   pool = g_object_new (META_TYPE_DEVICE_POOL, NULL);
+ 
+-  pool->backend = META_BACKEND (backend_native);
++  pool->backend = backend;
+ 
+   launcher = meta_backend_get_launcher (pool->backend);
+   if (launcher)
+diff --git a/src/backends/native/meta-seat-impl.c b/src/backends/native/meta-seat-impl.c
+index c45173abd5f9c5b1303b1c4f72262c00e2d9bb3d..98aab2962e94221d49dd0b564fff23ad129a4016 100644
+--- a/src/backends/native/meta-seat-impl.c
++++ b/src/backends/native/meta-seat-impl.c
+@@ -36,6 +36,7 @@
+ #include "backends/meta-cursor-tracker-private.h"
+ #include "backends/meta-fd-source.h"
+ #include "backends/meta-keymap-description-private.h"
++#include "backends/santos/meta-backend-santos.h"
+ #include "backends/native/meta-backend-native-private.h"
+ #include "backends/native/meta-barrier-native.h"
+ #include "backends/native/meta-device-pool.h"
+@@ -2970,6 +2971,13 @@ process_events (MetaSeatImpl *seat_impl)
+     }
+ }
+ 
++static gboolean
++is_standalone_santos (MetaBackend *backend)
++{
++  return META_IS_BACKEND_SANTOS (backend) &&
++         !meta_backend_get_launcher (backend);
++}
++
+ static int
+ open_restricted (const char *path,
+                  int         open_flags,
+@@ -2978,13 +2986,36 @@ open_restricted (const char *path,
+   MetaSeatImpl *seat_impl = user_data;
+   MetaSeatImplPrivate *priv = meta_seat_impl_get_instance_private (seat_impl);
+   MetaBackend *backend = meta_seat_native_get_backend (seat_impl->seat_native);
+-  MetaDevicePool *device_pool =
+-    meta_backend_native_get_device_pool (META_BACKEND_NATIVE (backend));
++  MetaDevicePool *device_pool;
+   MetaDeviceFileFlags flags;
+   g_autoptr (GError) error = NULL;
+   MetaDeviceFile *device_file;
+   int fd;
+ 
++  /* Santos is a direct MetaBackend rather than MetaBackendNative. In
++   * standalone operation there is no launcher-owned device pool/session, so
++   * keep libinput's normal udev discovery but open the evdev node directly. */
++  if (is_standalone_santos (backend))
++    {
++      do
++        fd = open (path, open_flags | O_CLOEXEC);
++      while (fd == -1 && errno == EINTR);
++
++      if (fd == -1)
++        {
++          g_warning ("Could not open device %s: %s",
++                     path, g_strerror (errno));
++          return -1;
++        }
++
++      return fd;
++    }
++
++  if (META_IS_BACKEND_SANTOS (backend))
++    device_pool = meta_backend_santos_get_device_pool (META_BACKEND_SANTOS (backend));
++  else
++    device_pool = meta_backend_native_get_device_pool (META_BACKEND_NATIVE (backend));
++
+   flags = META_DEVICE_FILE_FLAG_NONE;
+   if (!(open_flags & (O_RDWR | O_WRONLY)))
+     flags |= META_DEVICE_FILE_FLAG_READ_ONLY;
+@@ -3011,6 +3042,15 @@ close_restricted (int   fd,
+ {
+   MetaSeatImpl *seat_impl = user_data;
+   MetaSeatImplPrivate *priv = meta_seat_impl_get_instance_private (seat_impl);
++  MetaBackend *backend = meta_seat_native_get_backend (seat_impl->seat_native);
++
++  /* Launcher-owned files are released through MetaDevicePool. Standalone
++   * Santos returns an ordinary fd from open_restricted(), so close it here. */
++  if (is_standalone_santos (backend))
++    {
++      close (fd);
++      return;
++    }
+ 
+   g_hash_table_remove (priv->device_files, GINT_TO_POINTER (fd));
+ }
+diff --git a/src/backends/native/meta-seat-native.c b/src/backends/native/meta-seat-native.c
+index 6c2441f22a11a0aff6836e7472542f3859b73128..dca0d323b6f5c48a66d04724c007f4f71be034af 100644
+--- a/src/backends/native/meta-seat-native.c
++++ b/src/backends/native/meta-seat-native.c
+@@ -898,4 +898,5 @@ meta_seat_native_remove_cursor_renderer (MetaSeatNative *seat_native,
+     meta_cursor_renderer_set_sprite (seat_native->cursor_renderer, NULL);
+ 
+   g_hash_table_remove (seat_native->secondary_cursor_renderers, sprite);
++  meta_backend_remove_cursor_renderer_for_sprite (seat_native->backend, sprite);
+ }
+diff --git a/src/backends/santos/meta-backend-santos.c b/src/backends/santos/meta-backend-santos.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..e9a860e0936abf0b2d8992535e6053a1edad174e
+--- /dev/null
++++ b/src/backends/santos/meta-backend-santos.c
+@@ -0,0 +1,406 @@
++/*
++ * Copyright (C) 2026 Santos Project
++ *
++ * Minimal Mutter Santos Backend implementation.
++ */
++
++#include "config.h"
++
++#include "backends/santos/meta-backend-santos.h"
++#include "backends/santos/meta-clutter-backend-santos.h"
++#include "backends/santos/meta-gpu-santos.h"
++#include "backends/santos/meta-monitor-manager-santos.h"
++#include "backends/santos/meta-renderer-santos.h"
++
++#include "backends/meta-backend-private.h"
++#include "backends/meta-color-manager.h"
++#include "backends/meta-cursor-tracker-private.h"
++#include "backends/meta-launcher.h"
++#include "backends/meta-monitor-manager-private.h"
++#include "backends/meta-stage-private.h"
++#include "backends/native/meta-device-pool-private.h"
++#include "backends/native/meta-pointer-constraint-native.h"
++#include "backends/native/meta-seat-native.h"
++#include "backends/native/meta-input-thread.h"
++
++struct _MetaBackendSantos
++{
++  MetaBackend parent;
++
++  MetaDevicePool *device_pool;
++};
++
++static void
++initable_iface_init (GInitableIface *initable_iface);
++
++G_DEFINE_FINAL_TYPE_WITH_CODE (MetaBackendSantos, meta_backend_santos,
++                               META_TYPE_BACKEND,
++                               G_IMPLEMENT_INTERFACE (G_TYPE_INITABLE,
++                                                      initable_iface_init))
++
++static gboolean
++meta_backend_santos_init_basic (MetaBackend  *backend,
++                                GError      **error)
++{
++  MetaBackendSantos *self = META_BACKEND_SANTOS (backend);
++  MetaGpuSantos *gpu;
++
++  if (meta_backend_get_launcher (backend))
++    self->device_pool = meta_device_pool_new (backend);
++
++  gpu = meta_gpu_santos_new (backend);
++  meta_backend_add_gpu (backend, META_GPU (gpu));
++
++  return TRUE;
++}
++
++static ClutterBackend *
++meta_backend_santos_create_clutter_backend (MetaBackend    *backend,
++                                            ClutterContext *context)
++{
++  return meta_clutter_backend_santos_new (backend, context);
++}
++
++static gboolean
++meta_backend_santos_create_launcher (MetaBackend   *backend,
++                                     MetaLauncher **launcher_out,
++                                     GError       **error)
++{
++  g_autoptr (MetaLauncher) launcher = NULL;
++  g_autoptr (GError) local_error = NULL;
++
++  /* The standalone fallback is a successful result. Keep optional launcher
++   * errors local so TRUE can never be paired with a caller-visible error. */
++  (void) error;
++
++  launcher = meta_launcher_new (backend, &local_error);
++  if (!launcher)
++    {
++      g_message ("Santos backend: running without logind launcher: %s",
++                 local_error ? local_error->message : "none");
++      *launcher_out = NULL;
++      return TRUE;
++    }
++
++  if (!meta_launcher_take_control (launcher, &local_error))
++    {
++      g_warning ("Santos backend: failed to take control of session, falling back to standalone: %s",
++                 local_error ? local_error->message : "unknown error");
++      *launcher_out = NULL;
++      return TRUE;
++    }
++
++  *launcher_out = g_steal_pointer (&launcher);
++  return TRUE;
++}
++
++static ClutterSeat *
++meta_backend_santos_create_default_seat (MetaBackend  *backend,
++                                         GError      **error)
++{
++  ClutterContext *clutter_context = meta_backend_get_clutter_context (backend);
++  MetaLauncher *launcher = meta_backend_get_launcher (backend);
++  const char *seat_id = "seat0";
++  MetaSeatNativeFlag flags = META_SEAT_NATIVE_FLAG_NONE;
++
++  if (launcher && meta_launcher_get_seat_id (launcher))
++    seat_id = meta_launcher_get_seat_id (launcher);
++
++  return CLUTTER_SEAT (g_object_new (META_TYPE_SEAT_NATIVE,
++                                     "backend", backend,
++                                     "context", clutter_context,
++                                     "seat-id", seat_id,
++                                     "name", seat_id,
++                                     "flags", flags,
++                                     NULL));
++}
++
++static MetaMonitorManager *
++meta_backend_santos_create_monitor_manager (MetaBackend  *backend,
++                                            GError      **error)
++{
++  return META_MONITOR_MANAGER (meta_monitor_manager_santos_new (backend, error));
++}
++
++static MetaColorManager *
++meta_backend_santos_create_color_manager (MetaBackend *backend)
++{
++  return g_object_new (META_TYPE_COLOR_MANAGER,
++                       "backend", backend,
++                       NULL);
++}
++
++static MetaRenderer *
++meta_backend_santos_create_renderer (MetaBackend  *backend,
++                                     GError      **error)
++{
++  return META_RENDERER (meta_renderer_santos_new (backend, error));
++}
++
++static MetaBackendCapabilities
++meta_backend_santos_get_capabilities (MetaBackend *backend)
++{
++  return META_BACKEND_CAPABILITY_NONE;
++}
++
++static void
++meta_backend_santos_update_stage (MetaBackend *backend)
++{
++  ClutterActor *stage = meta_backend_get_stage (backend);
++  MetaMonitorManager *monitor_manager =
++    meta_backend_get_monitor_manager (backend);
++  int width, height;
++
++  meta_stage_rebuild_views (META_STAGE (stage));
++
++  meta_monitor_manager_get_screen_size (monitor_manager, &width, &height);
++  clutter_actor_set_size (stage, width, height);
++}
++
++static void
++meta_backend_santos_update_viewports (MetaBackend *backend)
++{
++  MetaMonitorManager *monitor_manager =
++    meta_backend_get_monitor_manager (backend);
++  ClutterBackend *clutter_backend = meta_backend_get_clutter_backend (backend);
++  MetaSeatNative *seat =
++    META_SEAT_NATIVE (clutter_backend_get_default_seat (clutter_backend));
++  MetaViewportInfo *viewports;
++
++  viewports = meta_monitor_manager_get_viewports (monitor_manager);
++  meta_seat_native_set_viewports (seat, viewports);
++  g_object_unref (viewports);
++}
++
++static gboolean
++meta_backend_santos_init_post (MetaBackend  *backend,
++                               GError      **error)
++{
++  MetaMonitorManager *monitor_manager =
++    meta_backend_get_monitor_manager (backend);
++  ClutterBackend *clutter_backend = meta_backend_get_clutter_backend (backend);
++  ClutterSeat *seat = clutter_backend_get_default_seat (clutter_backend);
++
++  g_signal_connect_swapped (monitor_manager, "monitors-changed-internal",
++                            G_CALLBACK (meta_backend_santos_update_viewports),
++                            backend);
++  meta_backend_santos_update_viewports (backend);
++
++  if (seat)
++    meta_seat_native_start (META_SEAT_NATIVE (seat));
++
++  return TRUE;
++}
++
++static MetaInputSettings *
++meta_backend_santos_get_input_settings (MetaBackend *backend)
++{
++  ClutterBackend *clutter_backend = meta_backend_get_clutter_backend (backend);
++  ClutterSeat *seat = clutter_backend_get_default_seat (clutter_backend);
++
++  if (seat)
++    {
++      MetaSeatNative *seat_native = META_SEAT_NATIVE (seat);
++      if (seat_native->impl)
++        return meta_seat_impl_get_input_settings (seat_native->impl);
++    }
++
++  return NULL;
++}
++
++static void
++meta_backend_santos_dispose (GObject *object)
++{
++  MetaBackendSantos *self = META_BACKEND_SANTOS (object);
++
++  G_OBJECT_CLASS (meta_backend_santos_parent_class)->dispose (object);
++
++  g_clear_object (&self->device_pool);
++}
++
++static MetaCursorRenderer *
++meta_backend_santos_get_cursor_renderer (MetaBackend   *backend,
++                                         ClutterSprite *sprite)
++{
++  ClutterBackend *clutter_backend = meta_backend_get_clutter_backend (backend);
++
++  if (!clutter_backend || !META_IS_CLUTTER_BACKEND_SANTOS (clutter_backend))
++    return NULL;
++
++  /* Santos has no KMS cursor plane. Use the base renderer so the cursor is
++   * composited by the software stage overlay rather than importing
++   * MetaCursorRendererNative's KMS/GBM contract. */
++  return meta_clutter_backend_santos_maybe_ensure_cursor_renderer (
++    META_CLUTTER_BACKEND_SANTOS (clutter_backend), sprite);
++}
++
++static void
++meta_backend_santos_remove_cursor_renderer (MetaBackend   *backend,
++                                             ClutterSprite *sprite)
++{
++  ClutterBackend *clutter_backend = meta_backend_get_clutter_backend (backend);
++
++  if (!clutter_backend || !META_IS_CLUTTER_BACKEND_SANTOS (clutter_backend))
++    return;
++
++  meta_clutter_backend_santos_remove_cursor_renderer (
++    META_CLUTTER_BACKEND_SANTOS (clutter_backend), sprite);
++}
++
++static MetaLogicalMonitor *
++meta_backend_santos_get_current_logical_monitor (MetaBackend *backend)
++{
++  MetaCursorTracker *cursor_tracker = meta_backend_get_cursor_tracker (backend);
++  MetaMonitorManager *monitor_manager =
++    meta_backend_get_monitor_manager (backend);
++  graphene_point_t point;
++
++  meta_cursor_tracker_get_pointer (cursor_tracker, &point, NULL);
++  return meta_monitor_manager_get_logical_monitor_at (monitor_manager,
++                                                       point.x, point.y);
++}
++
++static void
++meta_backend_santos_set_keymap_cb (GObject      *source_object,
++                                   GAsyncResult *result,
++                                   gpointer       user_data)
++{
++  MetaSeatNative *seat_native = META_SEAT_NATIVE (source_object);
++  g_autoptr (GTask) task = G_TASK (user_data);
++  g_autoptr (GError) error = NULL;
++
++  if (!meta_seat_native_set_keymap_finish (seat_native, result, &error))
++    {
++      g_task_return_error (task, g_steal_pointer (&error));
++      return;
++    }
++
++  g_task_return_boolean (task, TRUE);
++}
++
++static void
++meta_backend_santos_set_keymap_async (MetaBackend           *backend,
++                                      MetaKeymapDescription *description,
++                                      xkb_layout_index_t     layout_index,
++                                      GTask                 *task)
++{
++  ClutterBackend *clutter_backend = meta_backend_get_clutter_backend (backend);
++  ClutterSeat *seat = clutter_backend_get_default_seat (clutter_backend);
++
++  meta_seat_native_set_keymap_async (META_SEAT_NATIVE (seat),
++                                     description,
++                                     layout_index,
++                                     g_task_get_cancellable (task),
++                                     meta_backend_santos_set_keymap_cb,
++                                     task);
++}
++
++static void
++meta_backend_santos_set_pointer_constraint (MetaBackend           *backend,
++                                            MetaPointerConstraint *constraint)
++{
++  ClutterBackend *clutter_backend = meta_backend_get_clutter_backend (backend);
++  ClutterSeat *seat = clutter_backend_get_default_seat (clutter_backend);
++  g_autoptr (MetaPointerConstraintImpl) constraint_impl = NULL;
++  MtkRegion *region;
++
++  if (constraint)
++    {
++      graphene_point_t origin;
++      double min_edge_distance;
++
++      region = meta_pointer_constraint_get_region (constraint, &origin);
++      min_edge_distance =
++        meta_pointer_constraint_get_min_edge_distance (constraint);
++      constraint_impl = meta_pointer_constraint_impl_native_new (constraint,
++                                                                 seat,
++                                                                 region,
++                                                                 origin,
++                                                                 min_edge_distance);
++    }
++
++  meta_seat_native_set_pointer_constraint (META_SEAT_NATIVE (seat),
++                                           constraint_impl);
++}
++
++static struct xkb_keymap *
++meta_backend_santos_get_xkb_keymap (MetaBackend *backend)
++{
++  ClutterBackend *clutter_backend = meta_backend_get_clutter_backend (backend);
++  ClutterSeat *seat = clutter_backend_get_default_seat (clutter_backend);
++
++  if (seat)
++    return meta_seat_native_get_xkb_keymap (META_SEAT_NATIVE (seat));
++
++  return NULL;
++}
++
++static MetaKeymapDescription *
++meta_backend_santos_get_keymap_description (MetaBackend *backend)
++{
++  ClutterBackend *clutter_backend = meta_backend_get_clutter_backend (backend);
++  ClutterSeat *seat = clutter_backend_get_default_seat (clutter_backend);
++
++  if (seat)
++    return meta_seat_native_get_keymap_description (META_SEAT_NATIVE (seat));
++
++  return NULL;
++}
++
++static xkb_layout_index_t
++meta_backend_santos_get_keymap_layout_group (MetaBackend *backend)
++{
++  ClutterBackend *clutter_backend = meta_backend_get_clutter_backend (backend);
++  ClutterSeat *seat = clutter_backend_get_default_seat (clutter_backend);
++
++  if (seat)
++    return meta_seat_native_get_keyboard_layout_index (META_SEAT_NATIVE (seat));
++
++  return 0;
++}
++
++static void
++meta_backend_santos_init (MetaBackendSantos *self)
++{
++}
++
++static void
++meta_backend_santos_class_init (MetaBackendSantosClass *klass)
++{
++  MetaBackendClass *backend_class = META_BACKEND_CLASS (klass);
++  GObjectClass *object_class = G_OBJECT_CLASS (klass);
++
++  object_class->dispose = meta_backend_santos_dispose;
++  backend_class->init_basic = meta_backend_santos_init_basic;
++  backend_class->init_post = meta_backend_santos_init_post;
++  backend_class->create_clutter_backend = meta_backend_santos_create_clutter_backend;
++  backend_class->create_launcher = meta_backend_santos_create_launcher;
++  backend_class->create_default_seat = meta_backend_santos_create_default_seat;
++  backend_class->create_monitor_manager = meta_backend_santos_create_monitor_manager;
++  backend_class->create_color_manager = meta_backend_santos_create_color_manager;
++  backend_class->create_renderer = meta_backend_santos_create_renderer;
++  backend_class->get_capabilities = meta_backend_santos_get_capabilities;
++  backend_class->update_stage = meta_backend_santos_update_stage;
++  backend_class->get_input_settings = meta_backend_santos_get_input_settings;
++  backend_class->get_cursor_renderer = meta_backend_santos_get_cursor_renderer;
++  backend_class->remove_cursor_renderer = meta_backend_santos_remove_cursor_renderer;
++  backend_class->get_current_logical_monitor =
++    meta_backend_santos_get_current_logical_monitor;
++  backend_class->set_keymap_async = meta_backend_santos_set_keymap_async;
++  backend_class->get_xkb_keymap = meta_backend_santos_get_xkb_keymap;
++  backend_class->get_keymap_description = meta_backend_santos_get_keymap_description;
++  backend_class->get_keymap_layout_group = meta_backend_santos_get_keymap_layout_group;
++  backend_class->set_pointer_constraint =
++    meta_backend_santos_set_pointer_constraint;
++}
++
++MetaDevicePool *
++meta_backend_santos_get_device_pool (MetaBackendSantos *backend)
++{
++  return backend->device_pool;
++}
++
++static void
++initable_iface_init (GInitableIface *initable_iface)
++{
++}
+diff --git a/src/backends/santos/meta-backend-santos.h b/src/backends/santos/meta-backend-santos.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..b7cfb5564516d58cc7fd03aae4f1ea900f4ca395
+--- /dev/null
++++ b/src/backends/santos/meta-backend-santos.h
+@@ -0,0 +1,18 @@
++/*
++ * Copyright (C) 2026 Santos Project
++ *
++ * Minimal Mutter Santos Backend implementation.
++ */
++
++#pragma once
++
++#include "backends/meta-backend-private.h"
++
++#define META_TYPE_BACKEND_SANTOS (meta_backend_santos_get_type ())
++G_DECLARE_FINAL_TYPE (MetaBackendSantos, meta_backend_santos,
++                      META, BACKEND_SANTOS,
++                      MetaBackend)
++
++typedef struct _MetaDevicePool MetaDevicePool;
++
++MetaDevicePool * meta_backend_santos_get_device_pool (MetaBackendSantos *backend);
+diff --git a/src/backends/santos/meta-clutter-backend-santos.c b/src/backends/santos/meta-clutter-backend-santos.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..2b95829d2dce8dc340dc5db4f10d5c402c71bb16
+--- /dev/null
++++ b/src/backends/santos/meta-clutter-backend-santos.c
+@@ -0,0 +1,427 @@
++/*
++ * Copyright (C) 2026 Santos Project
++ *
++ * Minimal Mutter Santos Clutter backend implementation.
++ */
++
++#include "config.h"
++
++#include "backends/santos/meta-clutter-backend-santos.h"
++
++#include <glib-object.h>
++
++#include "backends/meta-cursor-renderer.h"
++#include "clutter/clutter-backend-private.h"
++#include "clutter/clutter-key-focus.h"
++#include "clutter/clutter-sprite-private.h"
++#include "backends/santos/meta-renderer-display-egl-santos.h"
++#include "backends/santos/meta-stage-santos.h"
++#include "backends/meta-backend-private.h"
++#include "backends/meta-renderer.h"
++#include "backends/native/meta-sprite-native.h"
++#include "clutter/clutter.h"
++#include "cogl/cogl-context-egl.h"
++
++struct _MetaClutterBackendSantos
++{
++  ClutterBackend parent;
++
++  MetaBackend *backend;
++
++  gboolean disposed;
++
++  GHashTable *touch_sprites;
++  GHashTable *stylus_sprites;
++  GHashTable *cursor_renderers;
++  ClutterSprite *pointer_sprite;
++  ClutterKeyFocus *key_focus;
++};
++
++G_DEFINE_FINAL_TYPE (MetaClutterBackendSantos,
++                     meta_clutter_backend_santos,
++                     CLUTTER_TYPE_BACKEND)
++
++static CoglRenderer *
++meta_clutter_backend_santos_get_renderer (ClutterBackend  *clutter_backend,
++                                          GError         **error)
++{
++  MetaClutterBackendSantos *self = META_CLUTTER_BACKEND_SANTOS (clutter_backend);
++  MetaRenderer *renderer = meta_backend_get_renderer (self->backend);
++
++  return meta_renderer_create_cogl_renderer (renderer);
++}
++
++static CoglDisplay *
++meta_clutter_backend_santos_get_display (ClutterBackend  *clutter_backend,
++                                         CoglRenderer    *cogl_renderer,
++                                         GError         **error)
++{
++  return COGL_DISPLAY (meta_renderer_display_egl_santos_new (cogl_renderer));
++}
++
++static CoglContext *
++meta_clutter_backend_santos_get_context (ClutterBackend  *clutter_backend,
++                                         CoglDisplay     *display,
++                                         GError         **error)
++{
++  return cogl_context_egl_new (display, error);
++}
++
++static ClutterStageWindow *
++meta_clutter_backend_santos_create_stage (ClutterBackend  *clutter_backend,
++                                          ClutterStage    *wrapper,
++                                          GError         **error)
++{
++  MetaClutterBackendSantos *self = META_CLUTTER_BACKEND_SANTOS (clutter_backend);
++
++  return CLUTTER_STAGE_WINDOW (meta_stage_santos_new (self->backend, wrapper));
++}
++
++static ClutterSeat *
++meta_clutter_backend_santos_get_default_seat (ClutterBackend *clutter_backend)
++{
++  MetaClutterBackendSantos *self = META_CLUTTER_BACKEND_SANTOS (clutter_backend);
++
++  return meta_backend_get_default_seat (self->backend);
++}
++
++static ClutterKeyFocus *
++meta_clutter_backend_santos_get_key_focus (ClutterBackend *clutter_backend,
++                                           ClutterStage   *stage)
++{
++  MetaClutterBackendSantos *self = META_CLUTTER_BACKEND_SANTOS (clutter_backend);
++
++  if (self->disposed)
++    return NULL;
++
++  if (!self->key_focus)
++    {
++      self->key_focus =
++        g_object_new (CLUTTER_TYPE_KEY_FOCUS,
++                      "stage", stage,
++                      NULL);
++    }
++
++  return self->key_focus;
++}
++
++static ClutterSprite *
++meta_clutter_backend_santos_create_sprite (ClutterBackend     *clutter_backend,
++                                           ClutterStage       *stage,
++                                           const ClutterEvent *for_event)
++{
++  MetaClutterBackendSantos *self =
++    META_CLUTTER_BACKEND_SANTOS (clutter_backend);
++  ClutterInputDevice *device;
++  ClutterInputDevice *sprite_device = NULL;
++  ClutterEventSequence *sequence = NULL;
++  ClutterSpriteRole role;
++
++  device = clutter_event_get_source_device (for_event);
++
++  if (clutter_event_get_event_sequence (for_event))
++    role = CLUTTER_SPRITE_ROLE_TOUCHPOINT;
++  else if (clutter_input_device_get_capabilities (device) ==
++           CLUTTER_INPUT_CAPABILITY_TABLET_TOOL)
++    role = CLUTTER_SPRITE_ROLE_TABLET;
++  else
++    role = CLUTTER_SPRITE_ROLE_POINTER;
++
++  if (role == CLUTTER_SPRITE_ROLE_TABLET)
++    sprite_device = device;
++  else if (role == CLUTTER_SPRITE_ROLE_TOUCHPOINT)
++    sequence = clutter_event_get_event_sequence (for_event);
++
++  return g_object_new (META_TYPE_SPRITE_NATIVE,
++                       "backend", self->backend,
++                       "stage", stage,
++                       "sprite-device", sprite_device,
++                       "sequence", sequence,
++                       "role", role,
++                       NULL);
++}
++
++static ClutterSprite *
++meta_clutter_backend_santos_ensure_sprite (ClutterBackend     *clutter_backend,
++                                           ClutterStage       *stage,
++                                           const ClutterEvent *for_event,
++                                           GHashTable         *sprites,
++                                           gpointer            key)
++{
++  ClutterSprite *sprite;
++
++  sprite = g_hash_table_lookup (sprites, key);
++  if (!sprite)
++    {
++      sprite = meta_clutter_backend_santos_create_sprite (clutter_backend,
++                                                          stage,
++                                                          for_event);
++      g_hash_table_insert (sprites, key, sprite);
++    }
++
++  return sprite;
++}
++
++static void
++meta_clutter_backend_santos_ensure_pointer_sprite (ClutterBackend *clutter_backend,
++                                                   ClutterStage   *stage)
++{
++  MetaClutterBackendSantos *self =
++    META_CLUTTER_BACKEND_SANTOS (clutter_backend);
++
++  if (self->pointer_sprite)
++    return;
++
++  self->pointer_sprite =
++    g_object_new (META_TYPE_SPRITE_NATIVE,
++                  "backend", self->backend,
++                  "stage", stage,
++                  "role", CLUTTER_SPRITE_ROLE_POINTER,
++                  NULL);
++}
++
++static ClutterSprite *
++meta_clutter_backend_santos_get_sprite (ClutterBackend     *clutter_backend,
++                                        ClutterStage       *stage,
++                                        const ClutterEvent *for_event)
++{
++  MetaClutterBackendSantos *self =
++    META_CLUTTER_BACKEND_SANTOS (clutter_backend);
++  ClutterInputDevice *source_device;
++  ClutterEventSequence *event_sequence;
++  ClutterInputDeviceType device_type;
++
++  if (self->disposed)
++    return NULL;
++
++  event_sequence = clutter_event_get_event_sequence (for_event);
++  if (event_sequence)
++    {
++      return meta_clutter_backend_santos_ensure_sprite (
++        clutter_backend, stage, for_event, self->touch_sprites,
++        event_sequence);
++    }
++
++  source_device = clutter_event_get_source_device (for_event);
++  device_type = clutter_input_device_get_device_type (source_device);
++
++  if (device_type == CLUTTER_TABLET_DEVICE ||
++      device_type == CLUTTER_PEN_DEVICE ||
++      device_type == CLUTTER_ERASER_DEVICE)
++    {
++      return meta_clutter_backend_santos_ensure_sprite (
++        clutter_backend, stage, for_event, self->stylus_sprites,
++        source_device);
++    }
++
++  if (device_type == CLUTTER_POINTER_DEVICE ||
++      device_type == CLUTTER_TOUCHPAD_DEVICE)
++    {
++      if (!self->pointer_sprite)
++        self->pointer_sprite =
++          meta_clutter_backend_santos_create_sprite (clutter_backend,
++                                                     stage,
++                                                     for_event);
++
++      return self->pointer_sprite;
++    }
++
++  return NULL;
++}
++
++static ClutterSprite *
++meta_clutter_backend_santos_get_pointer_sprite (ClutterBackend *clutter_backend,
++                                                ClutterStage   *stage)
++{
++  MetaClutterBackendSantos *self =
++    META_CLUTTER_BACKEND_SANTOS (clutter_backend);
++
++  if (self->disposed)
++    return NULL;
++
++  meta_clutter_backend_santos_ensure_pointer_sprite (clutter_backend, stage);
++  return self->pointer_sprite;
++}
++
++static void
++meta_clutter_backend_santos_drop_cursor_renderer (gpointer user_data)
++{
++  MetaCursorRenderer *cursor_renderer = user_data;
++
++  meta_cursor_renderer_set_sprite (cursor_renderer, NULL);
++  g_object_unref (cursor_renderer);
++}
++
++MetaCursorRenderer *
++meta_clutter_backend_santos_maybe_ensure_cursor_renderer (MetaClutterBackendSantos *self,
++                                                          ClutterSprite            *sprite)
++{
++  MetaCursorRenderer *cursor_renderer;
++
++  if (self->disposed ||
++      clutter_sprite_get_role (sprite) == CLUTTER_SPRITE_ROLE_TOUCHPOINT ||
++      !clutter_focus_get_current_actor (CLUTTER_FOCUS (sprite)))
++    return NULL;
++
++  cursor_renderer = g_hash_table_lookup (self->cursor_renderers, sprite);
++  if (!cursor_renderer)
++    {
++      cursor_renderer = meta_cursor_renderer_new (self->backend);
++      g_hash_table_insert (self->cursor_renderers, sprite, cursor_renderer);
++      meta_cursor_renderer_set_sprite (cursor_renderer, sprite);
++    }
++
++  return cursor_renderer;
++}
++
++void
++meta_clutter_backend_santos_remove_cursor_renderer (MetaClutterBackendSantos *self,
++                                                    ClutterSprite            *sprite)
++{
++  if (!self || !sprite || !self->cursor_renderers)
++    return;
++
++  g_hash_table_remove (self->cursor_renderers, sprite);
++}
++
++static void
++meta_clutter_backend_santos_destroy_sprite (ClutterBackend *clutter_backend,
++                                            ClutterSprite  *sprite)
++{
++  MetaClutterBackendSantos *self =
++    META_CLUTTER_BACKEND_SANTOS (clutter_backend);
++
++  g_object_ref (sprite);
++  meta_clutter_backend_santos_remove_cursor_renderer (self, sprite);
++  g_hash_table_remove (self->touch_sprites,
++                       clutter_sprite_get_sequence (sprite));
++  g_hash_table_remove (self->stylus_sprites,
++                       clutter_sprite_get_sprite_device (sprite));
++
++  if (self->pointer_sprite == sprite)
++    g_clear_object (&self->pointer_sprite);
++
++  g_object_unref (sprite);
++}
++
++static gboolean
++meta_clutter_backend_santos_foreach_sprite (ClutterBackend               *clutter_backend,
++                                            ClutterStage                 *stage,
++                                            ClutterStageInputForeachFunc  func,
++                                            gpointer                      user_data)
++{
++  MetaClutterBackendSantos *self =
++    META_CLUTTER_BACKEND_SANTOS (clutter_backend);
++  GHashTableIter iter;
++  ClutterSprite *sprite;
++
++  if (self->pointer_sprite &&
++      !func (stage, self->pointer_sprite, user_data))
++    return FALSE;
++
++  g_hash_table_iter_init (&iter, self->stylus_sprites);
++  while (g_hash_table_iter_next (&iter, NULL, (gpointer *) &sprite))
++    {
++      if (!func (stage, sprite, user_data))
++        return FALSE;
++    }
++
++  g_hash_table_iter_init (&iter, self->touch_sprites);
++  while (g_hash_table_iter_next (&iter, NULL, (gpointer *) &sprite))
++    {
++      if (!func (stage, sprite, user_data))
++        return FALSE;
++    }
++
++  return TRUE;
++}
++
++static gboolean
++meta_clutter_backend_santos_is_display_server (ClutterBackend *clutter_backend)
++{
++  return TRUE;
++}
++
++static ClutterCursor *
++meta_clutter_backend_santos_get_cursor (ClutterBackend    *clutter_backend,
++                                        ClutterCursorType  cursor_type)
++{
++  MetaClutterBackendSantos *self =
++    META_CLUTTER_BACKEND_SANTOS (clutter_backend);
++
++  return meta_backend_get_cursor (self->backend, cursor_type);
++}
++
++static void
++meta_clutter_backend_santos_constructed (GObject *object)
++{
++  MetaClutterBackendSantos *self = META_CLUTTER_BACKEND_SANTOS (object);
++
++  G_OBJECT_CLASS (meta_clutter_backend_santos_parent_class)->constructed (object);
++
++  self->touch_sprites =
++    g_hash_table_new_full (NULL, NULL, NULL, g_object_unref);
++  self->stylus_sprites =
++    g_hash_table_new_full (NULL, NULL, NULL, g_object_unref);
++  self->cursor_renderers =
++    g_hash_table_new_full (NULL, NULL, NULL,
++                           meta_clutter_backend_santos_drop_cursor_renderer);
++}
++
++static void
++meta_clutter_backend_santos_dispose (GObject *object)
++{
++  MetaClutterBackendSantos *self = META_CLUTTER_BACKEND_SANTOS (object);
++
++  self->disposed = TRUE;
++
++  g_clear_pointer (&self->cursor_renderers, g_hash_table_unref);
++  g_clear_object (&self->pointer_sprite);
++  g_clear_pointer (&self->touch_sprites, g_hash_table_unref);
++  g_clear_pointer (&self->stylus_sprites, g_hash_table_unref);
++  g_clear_object (&self->key_focus);
++
++  G_OBJECT_CLASS (meta_clutter_backend_santos_parent_class)->dispose (object);
++}
++
++static void
++meta_clutter_backend_santos_init (MetaClutterBackendSantos *self)
++{
++}
++
++static void
++meta_clutter_backend_santos_class_init (MetaClutterBackendSantosClass *klass)
++{
++  GObjectClass *object_class = G_OBJECT_CLASS (klass);
++  ClutterBackendClass *clutter_backend_class = CLUTTER_BACKEND_CLASS (klass);
++
++  object_class->constructed = meta_clutter_backend_santos_constructed;
++  object_class->dispose = meta_clutter_backend_santos_dispose;
++
++  clutter_backend_class->get_renderer = meta_clutter_backend_santos_get_renderer;
++  clutter_backend_class->get_display = meta_clutter_backend_santos_get_display;
++  clutter_backend_class->get_context = meta_clutter_backend_santos_get_context;
++  clutter_backend_class->create_stage = meta_clutter_backend_santos_create_stage;
++  clutter_backend_class->get_default_seat = meta_clutter_backend_santos_get_default_seat;
++  clutter_backend_class->is_display_server = meta_clutter_backend_santos_is_display_server;
++  clutter_backend_class->get_sprite = meta_clutter_backend_santos_get_sprite;
++  clutter_backend_class->get_pointer_sprite = meta_clutter_backend_santos_get_pointer_sprite;
++  clutter_backend_class->destroy_sprite = meta_clutter_backend_santos_destroy_sprite;
++  clutter_backend_class->get_key_focus = meta_clutter_backend_santos_get_key_focus;
++  clutter_backend_class->get_cursor = meta_clutter_backend_santos_get_cursor;
++  clutter_backend_class->foreach_sprite = meta_clutter_backend_santos_foreach_sprite;
++}
++
++ClutterBackend *
++meta_clutter_backend_santos_new (MetaBackend    *backend,
++                                 ClutterContext *context)
++{
++  MetaClutterBackendSantos *self;
++
++  self = g_object_new (META_TYPE_CLUTTER_BACKEND_SANTOS,
++                       "context", context,
++                       NULL);
++  self->backend = backend;
++
++  return CLUTTER_BACKEND (self);
++}
+diff --git a/src/backends/santos/meta-clutter-backend-santos.h b/src/backends/santos/meta-clutter-backend-santos.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..48bdac33d2b0b1dcb911096ff501f389e5e708b2
+--- /dev/null
++++ b/src/backends/santos/meta-clutter-backend-santos.h
+@@ -0,0 +1,27 @@
++/*
++ * Copyright (C) 2026 Santos Project
++ *
++ * Minimal Mutter Santos Clutter backend implementation.
++ */
++
++#pragma once
++
++#include "backends/meta-cursor-renderer.h"
++#include "clutter/clutter-mutter.h"
++#include "meta/meta-backend.h"
++
++#define META_TYPE_CLUTTER_BACKEND_SANTOS (meta_clutter_backend_santos_get_type ())
++G_DECLARE_FINAL_TYPE (MetaClutterBackendSantos, meta_clutter_backend_santos,
++                      META, CLUTTER_BACKEND_SANTOS,
++                      ClutterBackend)
++
++ClutterBackend * meta_clutter_backend_santos_new (MetaBackend    *backend,
++                                                  ClutterContext *context);
++
++MetaCursorRenderer *
++meta_clutter_backend_santos_maybe_ensure_cursor_renderer (MetaClutterBackendSantos *backend_santos,
++                                                          ClutterSprite            *sprite);
++
++void
++meta_clutter_backend_santos_remove_cursor_renderer (MetaClutterBackendSantos *backend_santos,
++                                                    ClutterSprite            *sprite);
+diff --git a/src/backends/santos/meta-crtc-santos.c b/src/backends/santos/meta-crtc-santos.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..b503c08242ee78e2553059aa30118ce5876425c5
+--- /dev/null
++++ b/src/backends/santos/meta-crtc-santos.c
+@@ -0,0 +1,68 @@
++/*
++ * Copyright (C) 2026 Santos Project
++ *
++ * Minimal Mutter Santos CRTC implementation.
++ */
++
++#include "config.h"
++
++#include "backends/santos/meta-crtc-santos.h"
++#include "mtk/mtk.h"
++
++struct _MetaCrtcSantos
++{
++  MetaCrtc parent;
++};
++
++G_DEFINE_FINAL_TYPE (MetaCrtcSantos, meta_crtc_santos, META_TYPE_CRTC)
++
++/*
++ * The Santos panel pipeline exposes no hardware gamma LUT: truthful
++ * "unsupported" semantics mirroring MetaCrtcVirtual (size 0 disables all
++ * downstream gamma paths: night light, color calibration, D-Bus LUT io).
++ */
++static size_t
++meta_crtc_santos_get_gamma_lut_size (MetaCrtc *crtc)
++{
++  return 0;
++}
++
++static MetaGammaLut *
++meta_crtc_santos_get_gamma_lut (MetaCrtc *crtc)
++{
++  return NULL;
++}
++
++static void
++meta_crtc_santos_set_gamma_lut (MetaCrtc           *crtc,
++                                const MetaGammaLut *lut)
++{
++  g_warn_if_reached ();
++}
++
++static void
++meta_crtc_santos_init (MetaCrtcSantos *crtc_santos)
++{
++}
++
++static void
++meta_crtc_santos_class_init (MetaCrtcSantosClass *klass)
++{
++  MetaCrtcClass *crtc_class = META_CRTC_CLASS (klass);
++
++  crtc_class->get_gamma_lut_size = meta_crtc_santos_get_gamma_lut_size;
++  crtc_class->get_gamma_lut = meta_crtc_santos_get_gamma_lut;
++  crtc_class->set_gamma_lut = meta_crtc_santos_set_gamma_lut;
++}
++
++MetaCrtcSantos *
++meta_crtc_santos_new (MetaGpu  *gpu,
++                      uint64_t  id)
++{
++  return g_object_new (META_TYPE_CRTC_SANTOS,
++                       "backend", meta_gpu_get_backend (gpu),
++                       "id", id,
++                       "gpu", gpu,
++                       "all-transforms", (1 << MTK_MONITOR_TRANSFORM_NORMAL),
++                       NULL);
++}
+diff --git a/src/backends/santos/meta-crtc-santos.h b/src/backends/santos/meta-crtc-santos.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..0fd8c1dfca4c17e2ffe14fa98e0b3a59eed7d0e2
+--- /dev/null
++++ b/src/backends/santos/meta-crtc-santos.h
+@@ -0,0 +1,18 @@
++/*
++ * Copyright (C) 2026 Santos Project
++ *
++ * Minimal Mutter Santos CRTC implementation.
++ */
++
++#pragma once
++
++#include "backends/meta-crtc.h"
++#include "backends/meta-gpu.h"
++
++#define META_TYPE_CRTC_SANTOS (meta_crtc_santos_get_type ())
++G_DECLARE_FINAL_TYPE (MetaCrtcSantos, meta_crtc_santos,
++                      META, CRTC_SANTOS,
++                      MetaCrtc)
++
++MetaCrtcSantos * meta_crtc_santos_new (MetaGpu  *gpu,
++                                       uint64_t  id);
+diff --git a/src/backends/santos/meta-frame-clock-driver-santos.c b/src/backends/santos/meta-frame-clock-driver-santos.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..e7e5251ece5a3a34477c9233dcb7984a1b12eece
+--- /dev/null
++++ b/src/backends/santos/meta-frame-clock-driver-santos.c
+@@ -0,0 +1,544 @@
++/*
++ * Copyright (C) 2026 Santos Project
++ *
++ * Santos Hardware VSYNC Frame Clock Driver for Mutter / Clutter.
++ *
++ * Connects the Santos PSB VSYNC provider (WAIT on Pipe-A hardware frame
++ * counter advance, ~59.94 Hz) to Clutter's passive frame clock scheduling
++ * boundary via the HWC vsync callback and an eventfd main-thread bridge.
++ * The eventfd is only a wakeup token; request-generation state is authoritative
++ * for deciding which hardware observation may dispatch.
++ */
++
++#include "config.h"
++
++#include "backends/santos/meta-frame-clock-driver-santos.h"
++
++#include <sys/eventfd.h>
++#include <unistd.h>
++#include <glib.h>
++
++struct _MetaSantosFrameClockDriver
++{
++  ClutterFrameClockDriver parent;
++
++  ClutterFrameClock *frame_clock;
++  santos_hwc_t *hwc;
++
++  int event_fd;
++  GSource *event_source;
++
++  GMutex state_lock;
++  GCond state_idle;
++  gboolean detaching;
++  gboolean detached;
++
++  guint fallback_timeout_id;
++  guint64 fallback_generation;
++
++  guint64 request_generation;
++  gboolean update_requested;
++  gboolean hardware_event_pending;
++  gboolean hardware_event_queued;
++  guint64 hardware_event_generation;
++  int64_t hardware_event_timestamp_ns;
++  int64_t last_vsync_ns;
++
++  guint64 hardware_dispatch_count;
++  guint64 fallback_dispatch_count;
++  gboolean proof_enabled;
++  guint proof_dispatch_limit;
++};
++
++G_DEFINE_FINAL_TYPE (MetaSantosFrameClockDriver,
++                     meta_santos_frame_clock_driver,
++                     CLUTTER_TYPE_FRAME_CLOCK_DRIVER)
++
++typedef struct _SantosVsyncSource
++{
++  GSource source;
++  MetaSantosFrameClockDriver *driver;
++  gpointer fd_tag;
++} SantosVsyncSource;
++
++static void
++drain_event_fd_locked (MetaSantosFrameClockDriver *driver);
++
++static void
++meta_santos_frame_clock_driver_dispatch (MetaSantosFrameClockDriver *driver,
++                                         int64_t                    time_us,
++                                         int64_t                    hardware_timestamp_ns,
++                                         gboolean                   hardware,
++                                         guint64                    generation);
++
++static gboolean
++santos_vsync_source_prepare (GSource *source,
++                             int     *timeout)
++{
++  *timeout = -1;
++  return FALSE;
++}
++
++static gboolean
++santos_vsync_source_check (GSource *source)
++{
++  SantosVsyncSource *vsource = (SantosVsyncSource *) source;
++  GIOCondition revents;
++
++  revents = g_source_query_unix_fd (source, vsource->fd_tag);
++  return (revents & G_IO_IN) != 0;
++}
++
++static gboolean
++santos_vsync_source_dispatch (GSource     *source,
++                              GSourceFunc  callback,
++                              gpointer     user_data)
++{
++  SantosVsyncSource *vsource = (SantosVsyncSource *) source;
++  MetaSantosFrameClockDriver *driver = vsource->driver;
++  guint fallback_id = 0;
++  int64_t hardware_timestamp_ns = 0;
++  guint64 hardware_generation = 0;
++  gboolean dispatch_hardware = FALSE;
++  gboolean was_detached;
++  uint64_t val = 0;
++  ssize_t ret;
++
++  (void) callback;
++  (void) user_data;
++
++  g_mutex_lock (&driver->state_lock);
++
++  /* Drain all notifications.  There is at most one queued token per request,
++   * but draining also disposes of a token left by a completed old request. */
++  if (!driver->detached && driver->event_fd >= 0)
++    {
++      do
++        ret = read (driver->event_fd, &val, sizeof (val));
++      while (ret == (ssize_t) sizeof (val));
++      driver->hardware_event_queued = FALSE;
++    }
++
++  if (!driver->detached && driver->update_requested &&
++      driver->hardware_event_pending &&
++      driver->hardware_event_generation == driver->request_generation)
++    {
++      dispatch_hardware = TRUE;
++      hardware_timestamp_ns = driver->hardware_event_timestamp_ns;
++      hardware_generation = driver->hardware_event_generation;
++      driver->hardware_event_pending = FALSE;
++      driver->update_requested = FALSE;
++      fallback_id = driver->fallback_timeout_id;
++      driver->fallback_timeout_id = 0;
++    }
++
++  was_detached = driver->detached;
++  g_mutex_unlock (&driver->state_lock);
++
++  if (fallback_id != 0)
++    g_source_remove (fallback_id);
++
++  if (dispatch_hardware)
++    {
++      int64_t hardware_timestamp_us = hardware_timestamp_ns / 1000;
++
++      /* The timestamp is a CLOCK_MONOTONIC software observation of the
++       * hardware counter transition, not hardware-captured presentation time. */
++      meta_santos_frame_clock_driver_dispatch (driver,
++                                               hardware_timestamp_us,
++                                               hardware_timestamp_ns,
++                                               TRUE,
++                                               hardware_generation);
++    }
++
++  return was_detached ? G_SOURCE_REMOVE : G_SOURCE_CONTINUE;
++}
++
++static void
++santos_vsync_source_finalize (GSource *source)
++{
++}
++
++static GSourceFuncs santos_vsync_source_funcs = {
++  santos_vsync_source_prepare,
++  santos_vsync_source_check,
++  santos_vsync_source_dispatch,
++  santos_vsync_source_finalize,
++};
++
++static gboolean
++santos_frame_clock_driver_fallback_timeout (gpointer user_data)
++{
++  MetaSantosFrameClockDriver *driver = user_data;
++
++  guint64 generation = 0;
++  int64_t hardware_timestamp_ns = 0;
++  gboolean dispatch_hardware = FALSE;
++  gboolean dispatch_fallback = FALSE;
++
++  g_mutex_lock (&driver->state_lock);
++
++  if (driver->detached || !driver->update_requested ||
++      driver->fallback_generation != driver->request_generation)
++    {
++      driver->fallback_timeout_id = 0;
++      g_mutex_unlock (&driver->state_lock);
++      return G_SOURCE_REMOVE;
++    }
++
++  driver->fallback_timeout_id = 0;
++  generation = driver->request_generation;
++
++  /* A hardware tick may already be pending even though this timer was
++   * dispatched first after a delayed main-loop turn.  It wins over fallback. */
++  if (driver->hardware_event_pending &&
++      driver->hardware_event_generation == generation)
++    {
++      dispatch_hardware = TRUE;
++      hardware_timestamp_ns = driver->hardware_event_timestamp_ns;
++      driver->hardware_event_pending = FALSE;
++      driver->update_requested = FALSE;
++      driver->hardware_event_queued = FALSE;
++      drain_event_fd_locked (driver);
++    }
++  else
++    {
++      dispatch_fallback = TRUE;
++      driver->update_requested = FALSE;
++      driver->hardware_event_pending = FALSE;
++      driver->hardware_event_queued = FALSE;
++      drain_event_fd_locked (driver);
++    }
++
++  g_mutex_unlock (&driver->state_lock);
++
++  if (dispatch_hardware)
++    {
++      /* This is still a hardware-backed dispatch; the timer only won main
++       * context ordering, not the source of the timestamp. */
++      meta_santos_frame_clock_driver_dispatch (driver,
++                                               hardware_timestamp_ns / 1000,
++                                               hardware_timestamp_ns,
++                                               TRUE,
++                                               generation);
++    }
++  else if (dispatch_fallback)
++    {
++      int64_t now_us = g_get_monotonic_time ();
++      g_warning_once ("[SANTOS_VSYNC] Hardware VSYNC timeout (>50ms); falling back to software dispatch");
++      meta_santos_frame_clock_driver_dispatch (driver,
++                                               now_us,
++                                               0,
++                                               FALSE,
++                                               generation);
++    }
++
++  return G_SOURCE_REMOVE;
++}
++
++static void
++meta_santos_frame_clock_driver_schedule_update (ClutterFrameClockDriver *clock_driver)
++{
++  MetaSantosFrameClockDriver *driver =
++    META_SANTOS_FRAME_CLOCK_DRIVER (clock_driver);
++
++  g_mutex_lock (&driver->state_lock);
++
++  if (driver->detached || driver->update_requested)
++    {
++      g_mutex_unlock (&driver->state_lock);
++      return;
++    }
++
++  driver->request_generation++;
++  if (driver->request_generation == 0)
++    driver->request_generation = 1;
++
++  /* A true fallback may leave an eventfd token for the already-completed
++   * request.  Remove it before exposing the new generation. */
++  drain_event_fd_locked (driver);
++  driver->hardware_event_pending = FALSE;
++  driver->hardware_event_queued = FALSE;
++  driver->hardware_event_generation = 0;
++  driver->hardware_event_timestamp_ns = 0;
++  driver->update_requested = TRUE;
++  driver->fallback_generation = driver->request_generation;
++
++  if (driver->fallback_timeout_id == 0)
++    {
++      driver->fallback_timeout_id =
++        g_timeout_add_full (CLUTTER_PRIORITY_REDRAW, 50,
++                            santos_frame_clock_driver_fallback_timeout,
++                            driver, NULL);
++    }
++
++  g_mutex_unlock (&driver->state_lock);
++}
++
++static void
++on_hwc_vsync (int64_t timestamp_ns, void *user_data)
++{
++  MetaSantosFrameClockDriver *driver = user_data;
++  uint64_t val = 1;
++
++  if (!driver)
++    return;
++
++  g_mutex_lock (&driver->state_lock);
++
++  if (driver->detached)
++    {
++      g_mutex_unlock (&driver->state_lock);
++      return;
++    }
++
++  driver->last_vsync_ns = timestamp_ns;
++
++  if (!driver->update_requested)
++    {
++      /* Idle gating suppresses main-loop wakeups, not the HWC provider's
++       * hardware-counter observation or its small callback bookkeeping cost. */
++      g_mutex_unlock (&driver->state_lock);
++      return;
++    }
++
++  if (!driver->hardware_event_pending)
++    {
++      driver->hardware_event_pending = TRUE;
++      driver->hardware_event_generation = driver->request_generation;
++    }
++  driver->hardware_event_timestamp_ns = timestamp_ns;
++
++  /* Keep the notification and the generation state under one lock.  The
++   * eventfd token is only a wakeup; the pending generation below is authoritative. */
++  if (!driver->hardware_event_queued && driver->event_fd >= 0)
++    {
++      ssize_t ret = write (driver->event_fd, &val, sizeof (val));
++      if (ret == (ssize_t) sizeof (val))
++        driver->hardware_event_queued = TRUE;
++    }
++
++  g_mutex_unlock (&driver->state_lock);
++}
++
++static void
++drain_event_fd_locked (MetaSantosFrameClockDriver *driver)
++{
++  uint64_t val;
++
++  if (driver->event_fd < 0)
++    return;
++
++  while (read (driver->event_fd, &val, sizeof (val)) == (ssize_t) sizeof (val))
++    ;
++}
++
++static void
++meta_santos_frame_clock_driver_dispatch (MetaSantosFrameClockDriver *driver,
++                                         int64_t                    time_us,
++                                         int64_t                    hardware_timestamp_ns,
++                                         gboolean                   hardware,
++                                         guint64                    generation)
++{
++  ClutterFrameClock *frame_clock;
++  guint64 dispatch_number = 0;
++  gboolean proof_log = FALSE;
++
++  g_mutex_lock (&driver->state_lock);
++  if (driver->detached || !driver->frame_clock)
++    {
++      g_mutex_unlock (&driver->state_lock);
++      return;
++    }
++
++  if (hardware)
++    {
++      dispatch_number = ++driver->hardware_dispatch_count;
++      proof_log = driver->proof_enabled && driver->proof_dispatch_limit > 0;
++      if (proof_log)
++        driver->proof_dispatch_limit--;
++    }
++  else
++    {
++      driver->fallback_dispatch_count++;
++    }
++
++  frame_clock = driver->frame_clock;
++  g_mutex_unlock (&driver->state_lock);
++
++  clutter_frame_clock_dispatch (frame_clock, time_us);
++
++  if (proof_log)
++    g_message ("[SANTOS_VSYNC] Mutter hardware-backed frame-clock dispatch #%"
++               G_GUINT64_FORMAT " generation=%" G_GUINT64_FORMAT
++               " timestamp_ns=%" G_GINT64_FORMAT,
++               dispatch_number, generation, hardware_timestamp_ns);
++}
++
++void
++meta_santos_frame_clock_driver_detach (MetaSantosFrameClockDriver *driver)
++{
++  santos_hwc_t *hwc;
++  GSource *event_source;
++  ClutterFrameClock *frame_clock;
++  guint fallback_id;
++  int event_fd;
++  guint64 hardware_dispatch_count;
++  guint64 fallback_dispatch_count;
++  gboolean proof_enabled;
++
++  if (!driver)
++    return;
++
++  g_mutex_lock (&driver->state_lock);
++  while (driver->detaching)
++    g_cond_wait (&driver->state_idle, &driver->state_lock);
++  if (driver->detached)
++    {
++      g_mutex_unlock (&driver->state_lock);
++      return;
++    }
++  driver->detaching = TRUE;
++  hwc = driver->hwc;
++  driver->hwc = NULL;
++  g_mutex_unlock (&driver->state_lock);
++
++  /* This is the lifetime barrier: no callback can still hold driver as its
++   * user_data once the eventfd/source/object below are released. */
++  if (hwc)
++    santos_hwc_set_vsync_callback (hwc, NULL, NULL);
++
++  g_mutex_lock (&driver->state_lock);
++  driver->detached = TRUE;
++  driver->detaching = FALSE;
++
++  fallback_id = driver->fallback_timeout_id;
++  driver->fallback_timeout_id = 0;
++  event_source = driver->event_source;
++  driver->event_source = NULL;
++  event_fd = driver->event_fd;
++  driver->event_fd = -1;
++  frame_clock = driver->frame_clock;
++  driver->frame_clock = NULL;
++  hardware_dispatch_count = driver->hardware_dispatch_count;
++  fallback_dispatch_count = driver->fallback_dispatch_count;
++  proof_enabled = driver->proof_enabled;
++  g_cond_broadcast (&driver->state_idle);
++  g_mutex_unlock (&driver->state_lock);
++
++  if (fallback_id != 0)
++    g_source_remove (fallback_id);
++
++  if (event_source)
++    {
++      g_source_destroy (event_source);
++      g_source_unref (event_source);
++    }
++
++  if (event_fd >= 0)
++    close (event_fd);
++
++  if (frame_clock)
++    {
++      g_object_remove_weak_pointer (G_OBJECT (frame_clock),
++                                    (gpointer *) &driver->frame_clock);
++    }
++
++  if (proof_enabled)
++    g_message ("[SANTOS_VSYNC] Mutter frame-clock proof summary: hardware_dispatches=%"
++               G_GUINT64_FORMAT " fallback_dispatches=%" G_GUINT64_FORMAT,
++               hardware_dispatch_count, fallback_dispatch_count);
++}
++
++static void
++meta_santos_frame_clock_driver_dispose (GObject *object)
++{
++  MetaSantosFrameClockDriver *driver =
++    META_SANTOS_FRAME_CLOCK_DRIVER (object);
++
++  meta_santos_frame_clock_driver_detach (driver);
++
++  G_OBJECT_CLASS (meta_santos_frame_clock_driver_parent_class)->dispose (object);
++}
++
++static void
++meta_santos_frame_clock_driver_finalize (GObject *object)
++{
++  MetaSantosFrameClockDriver *driver =
++    META_SANTOS_FRAME_CLOCK_DRIVER (object);
++
++  g_cond_clear (&driver->state_idle);
++  g_mutex_clear (&driver->state_lock);
++
++  G_OBJECT_CLASS (meta_santos_frame_clock_driver_parent_class)->finalize (object);
++}
++
++static void
++meta_santos_frame_clock_driver_init (MetaSantosFrameClockDriver *driver)
++{
++  driver->event_fd = -1;
++  g_mutex_init (&driver->state_lock);
++  g_cond_init (&driver->state_idle);
++}
++
++static void
++meta_santos_frame_clock_driver_class_init (MetaSantosFrameClockDriverClass *klass)
++{
++  GObjectClass *object_class = G_OBJECT_CLASS (klass);
++  ClutterFrameClockDriverClass *driver_class =
++    CLUTTER_FRAME_CLOCK_DRIVER_CLASS (klass);
++
++  object_class->dispose = meta_santos_frame_clock_driver_dispose;
++  object_class->finalize = meta_santos_frame_clock_driver_finalize;
++  driver_class->schedule_update = meta_santos_frame_clock_driver_schedule_update;
++}
++
++MetaSantosFrameClockDriver *
++meta_santos_frame_clock_driver_new (ClutterFrameClock *frame_clock,
++                                    santos_hwc_t       *hwc)
++{
++  MetaSantosFrameClockDriver *driver;
++  SantosVsyncSource *vsource;
++  GSource *source;
++  GMainContext *main_context;
++
++  driver = g_object_new (META_TYPE_SANTOS_FRAME_CLOCK_DRIVER, NULL);
++
++  driver->hwc = hwc;
++  driver->frame_clock = frame_clock;
++  g_object_add_weak_pointer (G_OBJECT (frame_clock),
++                             (gpointer *) &driver->frame_clock);
++
++  driver->event_fd = eventfd (0, EFD_CLOEXEC | EFD_NONBLOCK);
++  if (driver->event_fd < 0)
++    g_error ("Failed to create eventfd for Santos VSYNC driver: %m");
++
++  source = g_source_new (&santos_vsync_source_funcs, sizeof (SantosVsyncSource));
++  vsource = (SantosVsyncSource *) source;
++  vsource->driver = driver;
++  vsource->fd_tag = g_source_add_unix_fd (source, driver->event_fd, G_IO_IN);
++
++  g_source_set_name (source, "[mutter] Santos VSYNC driver source");
++  g_source_set_priority (source, CLUTTER_PRIORITY_REDRAW);
++  g_source_set_can_recurse (source, FALSE);
++
++  main_context = g_main_context_ref_thread_default ();
++  g_source_attach (source, main_context);
++  g_main_context_unref (main_context);
++
++  driver->event_source = source;
++
++  {
++    const char *proof_env = g_getenv ("SANTOS_VSYNC_PROOF_DISPATCHES");
++    if (proof_env && *proof_env)
++      {
++        guint64 requested = g_ascii_strtoull (proof_env, NULL, 10);
++        driver->proof_dispatch_limit = (guint) MIN (requested, (guint64) G_MAXUINT);
++        driver->proof_enabled = driver->proof_dispatch_limit > 0;
++      }
++  }
++
++  santos_hwc_set_vsync_callback (hwc, on_hwc_vsync, driver);
++
++  return driver;
++}
+diff --git a/src/backends/santos/meta-frame-clock-driver-santos.h b/src/backends/santos/meta-frame-clock-driver-santos.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..4f9ce0dbf83f96d85b3a992724e4170192516648
+--- /dev/null
++++ b/src/backends/santos/meta-frame-clock-driver-santos.h
+@@ -0,0 +1,27 @@
++/*
++ * Copyright (C) 2026 Santos Project
++ *
++ * Santos Hardware VSYNC Frame Clock Driver for Mutter / Clutter.
++ */
++
++#pragma once
++
++#include <clutter/clutter.h>
++#include "backends/santos/santos_hwc.h"
++
++G_BEGIN_DECLS
++
++#define META_TYPE_SANTOS_FRAME_CLOCK_DRIVER (meta_santos_frame_clock_driver_get_type ())
++G_DECLARE_FINAL_TYPE (MetaSantosFrameClockDriver,
++                      meta_santos_frame_clock_driver,
++                      META, SANTOS_FRAME_CLOCK_DRIVER,
++                      ClutterFrameClockDriver)
++
++MetaSantosFrameClockDriver *
++meta_santos_frame_clock_driver_new (ClutterFrameClock *frame_clock,
++                                    santos_hwc_t       *hwc);
++
++void
++meta_santos_frame_clock_driver_detach (MetaSantosFrameClockDriver *driver);
++
++G_END_DECLS
+diff --git a/src/backends/santos/meta-gpu-santos.c b/src/backends/santos/meta-gpu-santos.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..accd927f051290b7b022b1d6620e2333af3a93c2
+--- /dev/null
++++ b/src/backends/santos/meta-gpu-santos.c
+@@ -0,0 +1,96 @@
++/*
++ * Copyright (C) 2026 Santos Project
++ *
++ * Minimal Mutter Santos GPU implementation.
++ */
++
++#include "config.h"
++
++#include "backends/santos/meta-gpu-santos.h"
++#include "backends/santos/meta-crtc-santos.h"
++#include "backends/santos/meta-output-santos.h"
++#include "backends/meta-crtc-mode.h"
++#include "mtk/mtk.h"
++
++struct _MetaGpuSantos
++{
++  MetaGpu parent;
++};
++
++G_DEFINE_FINAL_TYPE (MetaGpuSantos, meta_gpu_santos, META_TYPE_GPU)
++
++static gboolean
++meta_gpu_santos_read_current (MetaGpu  *gpu,
++                              GError  **error)
++{
++  MetaCrtcModeInfo *mode_info;
++  MetaCrtcMode *mode;
++  MetaCrtcSantos *crtc;
++  MetaOutputInfo *output_info;
++  MetaOutputSantos *output;
++
++  mode_info = meta_crtc_mode_info_new ();
++  mode_info->width = 1280;
++  mode_info->height = 800;
++  mode_info->refresh_rate = 60.0f;
++  mode_info->refresh_rate_mode = META_CRTC_REFRESH_RATE_MODE_FIXED;
++  mode_info->pixel_clock_khz = 71100;
++  mode_info->flags = META_CRTC_MODE_FLAG_NONE;
++
++  mode = g_object_new (META_TYPE_CRTC_MODE,
++                       "id", (uint64_t) 1,
++                       "name", "1280x800",
++                       "info", mode_info,
++                       NULL);
++  meta_crtc_mode_info_unref (mode_info);
++
++  crtc = meta_crtc_santos_new (gpu, 1);
++
++  output_info = meta_output_info_new ();
++  output_info->name = g_strdup ("DSI-1");
++  output_info->vendor = g_strdup ("Samsung");
++  output_info->product = g_strdup ("GT-P5210");
++  output_info->serial = g_strdup ("00000000");
++  output_info->width_mm = 217;
++  output_info->height_mm = 136;
++  output_info->subpixel_order = META_SUBPIXEL_ORDER_UNKNOWN;
++  output_info->connector_type = META_CONNECTOR_TYPE_DSI;
++  output_info->panel_orientation_transform = MTK_MONITOR_TRANSFORM_NORMAL;
++  output_info->preferred_mode = mode;
++  output_info->modes = g_new0 (MetaCrtcMode *, 1);
++  output_info->modes[0] = g_object_ref (mode);
++  output_info->n_modes = 1;
++  output_info->possible_crtcs = g_new0 (MetaCrtc *, 1);
++  output_info->possible_crtcs[0] = META_CRTC (crtc);
++  output_info->n_possible_crtcs = 1;
++
++  output = meta_output_santos_new (gpu, 1, output_info);
++  meta_output_info_unref (output_info);
++
++  meta_gpu_take_modes (gpu, g_list_append (NULL, mode));
++  meta_gpu_take_crtcs (gpu, g_list_append (NULL, crtc));
++  meta_gpu_take_outputs (gpu, g_list_append (NULL, output));
++
++  return TRUE;
++}
++
++static void
++meta_gpu_santos_init (MetaGpuSantos *gpu_santos)
++{
++}
++
++static void
++meta_gpu_santos_class_init (MetaGpuSantosClass *klass)
++{
++  MetaGpuClass *gpu_class = META_GPU_CLASS (klass);
++
++  gpu_class->read_current = meta_gpu_santos_read_current;
++}
++
++MetaGpuSantos *
++meta_gpu_santos_new (MetaBackend *backend)
++{
++  return g_object_new (META_TYPE_GPU_SANTOS,
++                       "backend", backend,
++                       NULL);
++}
+diff --git a/src/backends/santos/meta-gpu-santos.h b/src/backends/santos/meta-gpu-santos.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..62a0eae8ba66de62f7884215f2c34778e9894f8a
+--- /dev/null
++++ b/src/backends/santos/meta-gpu-santos.h
+@@ -0,0 +1,17 @@
++/*
++ * Copyright (C) 2026 Santos Project
++ *
++ * Minimal Mutter Santos GPU implementation.
++ */
++
++#pragma once
++
++#include "backends/meta-backend-private.h"
++#include "backends/meta-gpu.h"
++
++#define META_TYPE_GPU_SANTOS (meta_gpu_santos_get_type ())
++G_DECLARE_FINAL_TYPE (MetaGpuSantos, meta_gpu_santos,
++                      META, GPU_SANTOS,
++                      MetaGpu)
++
++MetaGpuSantos * meta_gpu_santos_new (MetaBackend *backend);
+diff --git a/src/backends/santos/meta-monitor-manager-santos.c b/src/backends/santos/meta-monitor-manager-santos.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..77cda63335b67f7dea799dc8d0352c189e038589
+--- /dev/null
++++ b/src/backends/santos/meta-monitor-manager-santos.c
+@@ -0,0 +1,250 @@
++/*
++ * Copyright (C) 2026 Santos Project
++ *
++ * Minimal Mutter Santos Monitor Manager implementation.
++ */
++
++#include "config.h"
++
++#include "backends/santos/meta-monitor-manager-santos.h"
++#include "backends/meta-monitor-manager-private.h"
++#include "backends/meta-monitor-config-manager.h"
++
++struct _MetaMonitorManagerSantos
++{
++  MetaMonitorManager parent;
++};
++
++static void
++initable_iface_init (GInitableIface *initable_iface);
++
++G_DEFINE_FINAL_TYPE_WITH_CODE (MetaMonitorManagerSantos, meta_monitor_manager_santos,
++                               META_TYPE_MONITOR_MANAGER,
++                               G_IMPLEMENT_INTERFACE (G_TYPE_INITABLE,
++                                                      initable_iface_init))
++
++static gboolean
++meta_monitor_manager_santos_initable_init (GInitable     *initable,
++                                           GCancellable  *cancellable,
++                                           GError       **error)
++{
++  return TRUE;
++}
++
++static void
++initable_iface_init (GInitableIface *initable_iface)
++{
++  initable_iface->init = meta_monitor_manager_santos_initable_init;
++}
++
++static void
++meta_monitor_manager_santos_ensure_initial_config (MetaMonitorManager *manager)
++{
++  MetaMonitorsConfig *config;
++
++  config = meta_monitor_manager_ensure_configured (manager);
++  meta_monitor_manager_update_logical_state (manager, config, NULL);
++}
++
++static void
++meta_monitor_manager_santos_apply_crtc_assignments (MetaMonitorManager *manager,
++                                                    GPtrArray           *crtc_assignments,
++                                                    GPtrArray           *output_assignments)
++{
++  MetaBackend *backend = meta_monitor_manager_get_backend (manager);
++  GList *to_configure_outputs = NULL;
++  GList *to_configure_crtcs = NULL;
++  GList *l;
++
++  /* A new configuration may omit an object that was assigned previously.
++   * Keep the complete GPU inventory so those stale assignments are cleared. */
++  for (l = meta_backend_get_gpus (backend); l; l = l->next)
++    {
++      MetaGpu *gpu = l->data;
++
++      to_configure_outputs =
++        g_list_concat (to_configure_outputs,
++                       g_list_copy (meta_gpu_get_outputs (gpu)));
++      to_configure_crtcs =
++        g_list_concat (to_configure_crtcs,
++                       g_list_copy (meta_gpu_get_crtcs (gpu)));
++    }
++
++  if (crtc_assignments)
++    {
++      for (unsigned int i = 0; i < crtc_assignments->len; i++)
++        {
++          MetaCrtcAssignment *crtc_assignment =
++            g_ptr_array_index (crtc_assignments, i);
++          MetaCrtc *crtc = crtc_assignment->crtc;
++
++          to_configure_crtcs = g_list_remove (to_configure_crtcs, crtc);
++
++          if (!crtc_assignment->mode)
++            {
++              meta_crtc_unset_config (crtc);
++            }
++          else
++            {
++              MetaCrtcConfig *crtc_config;
++
++              crtc_config = meta_crtc_config_new (&crtc_assignment->layout,
++                                                  crtc_assignment->mode,
++                                                  crtc_assignment->transform);
++              meta_crtc_set_config (crtc, crtc_config,
++                                    crtc_assignment->backend_private);
++
++              for (unsigned int j = 0;
++                   j < crtc_assignment->outputs->len;
++                   j++)
++                {
++                  MetaOutput *output =
++                    g_ptr_array_index (crtc_assignment->outputs, j);
++                  MetaOutputAssignment *output_assignment;
++
++                  to_configure_outputs =
++                    g_list_remove (to_configure_outputs, output);
++                  output_assignment = meta_find_output_assignment (
++                    output_assignments ?
++                      (MetaOutputAssignment **) output_assignments->pdata : NULL,
++                    output_assignments ? output_assignments->len : 0,
++                    output);
++                  meta_output_assign_crtc (output, crtc, output_assignment);
++                }
++            }
++        }
++    }
++
++  g_list_foreach (to_configure_crtcs,
++                  (GFunc) meta_crtc_unset_config,
++                  NULL);
++  g_list_foreach (to_configure_outputs,
++                  (GFunc) meta_output_unassign_crtc,
++                  NULL);
++  g_list_free (to_configure_crtcs);
++  g_list_free (to_configure_outputs);
++}
++
++static gboolean
++meta_monitor_manager_santos_apply_monitors_config (MetaMonitorManager        *manager,
++                                                   MetaMonitorsConfig        *config,
++                                                   MetaMonitorsConfigMethod   method,
++                                                   GError                   **error)
++{
++  GPtrArray *crtc_assignments;
++  GPtrArray *output_assignments;
++
++  if (!config)
++    {
++      meta_monitor_manager_santos_apply_crtc_assignments (manager, NULL, NULL);
++      manager->screen_width = 1280;
++      manager->screen_height = 800;
++      meta_monitor_manager_rebuild (manager, NULL);
++      return TRUE;
++    }
++
++  if (!meta_monitor_config_manager_assign (manager, config,
++                                           &crtc_assignments,
++                                           &output_assignments,
++                                           error))
++    return FALSE;
++
++  if (method == META_MONITORS_CONFIG_METHOD_VERIFY)
++    {
++      g_ptr_array_free (crtc_assignments, TRUE);
++      g_ptr_array_free (output_assignments, TRUE);
++      return TRUE;
++    }
++
++  meta_monitor_manager_santos_apply_crtc_assignments (manager,
++                                                       crtc_assignments,
++                                                       output_assignments);
++
++  g_ptr_array_free (crtc_assignments, TRUE);
++  g_ptr_array_free (output_assignments, TRUE);
++
++  manager->screen_width = 1280;
++  manager->screen_height = 800;
++  meta_monitor_manager_rebuild (manager, config);
++
++  return TRUE;
++}
++
++static float
++meta_monitor_manager_santos_calculate_monitor_mode_scale (MetaMonitorManager           *manager,
++                                                          MetaLogicalMonitorLayoutMode  layout_mode,
++                                                          MetaMonitor                  *monitor,
++                                                          MetaMonitorMode              *monitor_mode)
++{
++  return 1.0f;
++}
++
++static float *
++meta_monitor_manager_santos_calculate_supported_scales (MetaMonitorManager           *manager,
++                                                        MetaLogicalMonitorLayoutMode  layout_mode,
++                                                        MetaMonitor                  *monitor,
++                                                        MetaMonitorMode              *monitor_mode,
++                                                        int                          *n_supported_scales)
++{
++  float *scales;
++
++  scales = g_new0 (float, 1);
++  scales[0] = 1.0f;
++  *n_supported_scales = 1;
++
++  return scales;
++}
++
++static MetaMonitorManagerCapability
++meta_monitor_manager_santos_get_capabilities (MetaMonitorManager *manager)
++{
++  return META_MONITOR_MANAGER_CAPABILITY_NONE;
++}
++
++static gboolean
++meta_monitor_manager_santos_get_max_screen_size (MetaMonitorManager *manager,
++                                                 int                *max_width,
++                                                 int                *max_height)
++{
++  if (max_width)
++    *max_width = 1280;
++  if (max_height)
++    *max_height = 800;
++
++  return TRUE;
++}
++
++static MetaLogicalMonitorLayoutMode
++meta_monitor_manager_santos_get_default_layout_mode (MetaMonitorManager *manager)
++{
++  return META_LOGICAL_MONITOR_LAYOUT_MODE_LOGICAL;
++}
++
++static void
++meta_monitor_manager_santos_init (MetaMonitorManagerSantos *manager_santos)
++{
++}
++
++static void
++meta_monitor_manager_santos_class_init (MetaMonitorManagerSantosClass *klass)
++{
++  MetaMonitorManagerClass *manager_class = META_MONITOR_MANAGER_CLASS (klass);
++
++  manager_class->ensure_initial_config = meta_monitor_manager_santos_ensure_initial_config;
++  manager_class->apply_monitors_config = meta_monitor_manager_santos_apply_monitors_config;
++  manager_class->calculate_monitor_mode_scale = meta_monitor_manager_santos_calculate_monitor_mode_scale;
++  manager_class->calculate_supported_scales = meta_monitor_manager_santos_calculate_supported_scales;
++  manager_class->get_capabilities = meta_monitor_manager_santos_get_capabilities;
++  manager_class->get_max_screen_size = meta_monitor_manager_santos_get_max_screen_size;
++  manager_class->get_default_layout_mode = meta_monitor_manager_santos_get_default_layout_mode;
++}
++
++MetaMonitorManagerSantos *
++meta_monitor_manager_santos_new (MetaBackend  *backend,
++                                 GError      **error)
++{
++  return g_initable_new (META_TYPE_MONITOR_MANAGER_SANTOS,
++                         NULL, error,
++                         "backend", backend,
++                         NULL);
++}
+diff --git a/src/backends/santos/meta-monitor-manager-santos.h b/src/backends/santos/meta-monitor-manager-santos.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..4eeb6d8a60fcab93c705a509d084640de669c27a
+--- /dev/null
++++ b/src/backends/santos/meta-monitor-manager-santos.h
+@@ -0,0 +1,17 @@
++/*
++ * Copyright (C) 2026 Santos Project
++ *
++ * Minimal Mutter Santos Monitor Manager implementation.
++ */
++
++#pragma once
++
++#include "backends/meta-monitor-manager-private.h"
++
++#define META_TYPE_MONITOR_MANAGER_SANTOS (meta_monitor_manager_santos_get_type ())
++G_DECLARE_FINAL_TYPE (MetaMonitorManagerSantos, meta_monitor_manager_santos,
++                      META, MONITOR_MANAGER_SANTOS,
++                      MetaMonitorManager)
++
++MetaMonitorManagerSantos * meta_monitor_manager_santos_new (MetaBackend  *backend,
++                                                            GError      **error);
+diff --git a/src/backends/santos/meta-onscreen-santos.c b/src/backends/santos/meta-onscreen-santos.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..a6a6205fd42b58110e20382607cfb70ea781f5b1
+--- /dev/null
++++ b/src/backends/santos/meta-onscreen-santos.c
+@@ -0,0 +1,176 @@
++/*
++ * Copyright (C) 2026 Santos Project
++ *
++ * Minimal Mutter Santos Onscreen implementation.
++ */
++
++#include "config.h"
++
++#include "cogl/cogl.h"
++#include "backends/santos/meta-onscreen-santos.h"
++#include "backends/santos/meta-renderer-santos.h"
++
++#include <EGL/egl.h>
++#include "clutter/clutter-mutter.h"
++#include "cogl/cogl-context-private.h"
++#include "cogl/cogl-display-egl.h"
++#include "cogl/cogl-frame-info-private.h"
++#include "cogl/cogl-framebuffer-driver.h"
++#include "cogl/cogl-onscreen-private.h"
++#include "cogl/cogl-renderer-egl.h"
++#include "backends/meta-backend-private.h"
++#include "backends/meta-renderer.h"
++#include "meta/meta-context.h"
++#include "clutter/clutter.h"
++
++struct _MetaOnscreenSantos
++{
++  CoglOnscreenEgl parent;
++
++  MetaRendererSantos *renderer_santos;
++  santos_hwc_t *hwc;
++  unsigned int sequence;
++  uint64_t target_frames;
++  gboolean last_frame_failed;
++};
++
++G_DEFINE_FINAL_TYPE (MetaOnscreenSantos, meta_onscreen_santos, COGL_TYPE_ONSCREEN_EGL)
++
++static gboolean
++meta_onscreen_santos_swap_buffers_with_damage (CoglOnscreen    *onscreen,
++                                               const MtkRegion *region,
++                                               CoglFrameInfo   *frame_info,
++                                               gpointer         user_data)
++{
++  MetaOnscreenSantos *self = META_ONSCREEN_SANTOS (onscreen);
++  ClutterFrame *frame = user_data;
++  uint64_t target_gen;
++
++  target_gen = ++self->target_frames;
++  santos_hwc_arm_frame (self->hwc, target_gen);
++
++  /*
++   * Parent swap_buffers_with_damage binds context, flushes state, and
++   * invokes eglSwapBuffers(). Under Android/libhybris EGL, eglSwapBuffers
++   * synchronously executes santos_hwc's present_callback, queuing and
++   * retiring the frame on the hardware display panel.
++   */
++  if (!COGL_ONSCREEN_CLASS (meta_onscreen_santos_parent_class)->
++         swap_buffers_with_damage (onscreen, region, frame_info, user_data))
++    {
++      if (frame)
++        clutter_frame_set_result (frame, CLUTTER_FRAME_RESULT_IDLE);
++      return FALSE;
++    }
++
++  /*
++   * L126: Verify that the synchronous HWC present callback actually succeeded
++   * for this exact frame generation. If HWC prepare or set failed, the
++   * hardware dropped the frame; we must NOT report presentation to Mutter
++   * or Wayland clients, must NOT fabricate timestamps, and must mark
++   * the ClutterFrame as IDLE so the frame clock can reschedule/retry.
++   */
++  if (!santos_hwc_end_frame (self->hwc, target_gen))
++    {
++      if (frame)
++        clutter_frame_set_result (frame, CLUTTER_FRAME_RESULT_IDLE);
++      self->last_frame_failed = TRUE;
++      g_warning ("[SANTOS_ONSCREEN] Frame gen=%" G_GUINT64_FORMAT
++                 " present FAILED -> CLUTTER_FRAME_RESULT_IDLE (sequence=%u unchanged)",
++                 target_gen, self->sequence);
++      return FALSE;
++    }
++
++  if (self->last_frame_failed)
++    {
++      self->last_frame_failed = FALSE;
++      g_message ("[SANTOS_ONSCREEN] Frame gen=%" G_GUINT64_FORMAT
++                 " present RECOVERED -> PENDING_PRESENTED sequence=%u",
++                 target_gen, self->sequence + 1);
++    }
++
++  if (frame)
++    clutter_frame_set_result (frame, CLUTTER_FRAME_RESULT_PENDING_PRESENTED);
++
++  /*
++   * L125 / Honest Presentation Feedback:
++   * Santos PSB VSYNC provides a proven hardware refresh scheduling clock,
++   * but Candidate3B / HWC retirement does NOT provide proven frame scanout time.
++   * The scheduling timestamp is a CLOCK_MONOTONIC software observation of a
++   * hardware counter transition, not hardware-captured presentation time.
++   * Marking symbolic presentation resets the ClutterFrameClock cleanly via
++   * notify_ready without fabricating physical scanout metadata.
++   */
++  frame_info->presentation_time_us = 0;
++  frame_info->refresh_rate = 60.0f;
++  frame_info->flags = COGL_FRAME_INFO_FLAG_SYMBOLIC;
++  frame_info->sequence = ++self->sequence;
++
++  _cogl_onscreen_notify_frame_sync (onscreen, frame_info);
++  _cogl_onscreen_notify_complete (onscreen, frame_info);
++
++  return TRUE;
++}
++
++static void
++meta_onscreen_santos_init (MetaOnscreenSantos *self)
++{
++}
++
++static void
++meta_onscreen_santos_class_init (MetaOnscreenSantosClass *klass)
++{
++  CoglOnscreenClass *onscreen_class = COGL_ONSCREEN_CLASS (klass);
++
++  onscreen_class->swap_buffers_with_damage =
++    meta_onscreen_santos_swap_buffers_with_damage;
++}
++
++MetaOnscreenSantos *
++meta_onscreen_santos_new (MetaRendererSantos *renderer_santos,
++                          CoglContext        *cogl_context,
++                          int                 width,
++                          int                 height)
++{
++  MetaOnscreenSantos *self;
++  CoglFramebufferDriverConfig driver_config;
++  CoglDisplay *display;
++  CoglRenderer *renderer;
++  CoglRendererEGL *renderer_egl;
++  EGLDisplay edpy;
++  EGLConfig config;
++  void *win;
++  EGLSurface surface;
++
++  driver_config = (CoglFramebufferDriverConfig) {
++    .type = COGL_FRAMEBUFFER_DRIVER_TYPE_BACK,
++  };
++
++  self = g_object_new (META_TYPE_ONSCREEN_SANTOS,
++                       "context", cogl_context,
++                       "driver-config", &driver_config,
++                       "width", width,
++                       "height", height,
++                       NULL);
++
++  self->renderer_santos = renderer_santos;
++  self->hwc = meta_renderer_santos_get_hwc (renderer_santos);
++
++  display = cogl_context_get_display (cogl_context);
++  renderer = cogl_context_get_renderer (cogl_context);
++  renderer_egl = COGL_RENDERER_EGL (renderer);
++  edpy = cogl_renderer_egl_get_edisplay (renderer_egl);
++  config = cogl_display_egl_get_egl_config (COGL_DISPLAY_EGL (display));
++
++  win = santos_hwc_get_native_window (self->hwc);
++  if (!win)
++    g_error ("santos_hwc_get_native_window returned NULL");
++
++  surface = eglCreateWindowSurface (edpy, config, (EGLNativeWindowType) win, NULL);
++  if (surface == EGL_NO_SURFACE)
++    g_error ("eglCreateWindowSurface failed for Santos HWC: 0x%x", (unsigned int) eglGetError ());
++
++  cogl_onscreen_egl_set_egl_surface (COGL_ONSCREEN_EGL (self), surface);
++
++  return self;
++}
+diff --git a/src/backends/santos/meta-onscreen-santos.h b/src/backends/santos/meta-onscreen-santos.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..af27fc050e2b2424e762baf7380f6b51c7c11603
+--- /dev/null
++++ b/src/backends/santos/meta-onscreen-santos.h
+@@ -0,0 +1,23 @@
++/*
++ * Copyright (C) 2026 Santos Project
++ *
++ * Minimal Mutter Santos Onscreen implementation.
++ */
++
++#pragma once
++
++#include "cogl/cogl.h"
++#include "cogl/winsys/cogl-onscreen-egl.h"
++#include "backends/santos/santos_hwc.h"
++
++typedef struct _MetaRendererSantos MetaRendererSantos;
++
++#define META_TYPE_ONSCREEN_SANTOS (meta_onscreen_santos_get_type ())
++G_DECLARE_FINAL_TYPE (MetaOnscreenSantos, meta_onscreen_santos,
++                      META, ONSCREEN_SANTOS,
++                      CoglOnscreenEgl)
++
++MetaOnscreenSantos * meta_onscreen_santos_new (MetaRendererSantos *renderer_santos,
++                                               CoglContext        *cogl_context,
++                                               int                 width,
++                                               int                 height);
+diff --git a/src/backends/santos/meta-output-santos.c b/src/backends/santos/meta-output-santos.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..331d3c0e4b126d430abeb0ef549662d02b43ee8c
+--- /dev/null
++++ b/src/backends/santos/meta-output-santos.c
+@@ -0,0 +1,66 @@
++/*
++ * Copyright (C) 2026 Santos Project
++ *
++ * Minimal Mutter Santos Output implementation.
++ */
++
++#include "config.h"
++
++#include "backends/santos/meta-output-santos.h"
++
++#include "backends/meta-backlight-sysfs-private.h"
++#include "backends/meta-monitor-private.h"
++#include "backends/meta-output.h"
++
++struct _MetaOutputSantos
++{
++  MetaOutput parent;
++};
++
++G_DEFINE_FINAL_TYPE (MetaOutputSantos, meta_output_santos, META_TYPE_OUTPUT)
++
++static void
++meta_output_santos_init (MetaOutputSantos *output_santos)
++{
++}
++
++static MetaBacklight *
++meta_output_santos_create_backlight (MetaOutput  *output,
++                                     GError     **error)
++{
++  MetaMonitor *monitor = meta_output_get_monitor (output);
++  MetaBackend *backend = meta_monitor_get_backend (monitor);
++  const MetaOutputInfo *output_info = meta_output_get_info (output);
++
++  /* Reuse the stock sysfs discovery (firmware -> platform -> connector
++   * -> first raw for builtin panels). The Santos panel
++   * (/sys/class/backlight/panel, type raw) is picked by the raw
++   * fallback, so the Shell/Settings brightness UI and brightness keys
++   * drive the proven backlight path with udev change sync, no custom
++   * code and no session/logind dependency (direct sysfs write as the
++   * product user via the video-group rule).
++   */
++  return META_BACKLIGHT (meta_backlight_sysfs_new (backend,
++                                                  output_info,
++                                                  error));
++}
++
++static void
++meta_output_santos_class_init (MetaOutputSantosClass *klass)
++{
++  MetaOutputClass *output_class = META_OUTPUT_CLASS (klass);
++
++  output_class->create_backlight = meta_output_santos_create_backlight;
++}
++
++MetaOutputSantos *
++meta_output_santos_new (MetaGpu        *gpu,
++                        uint64_t        id,
++                        MetaOutputInfo *info)
++{
++  return g_object_new (META_TYPE_OUTPUT_SANTOS,
++                       "id", id,
++                       "gpu", gpu,
++                       "info", info,
++                       NULL);
++}
+diff --git a/src/backends/santos/meta-output-santos.h b/src/backends/santos/meta-output-santos.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..d1d6b457ae26b6ee1ece5cffe9d90df52418a803
+--- /dev/null
++++ b/src/backends/santos/meta-output-santos.h
+@@ -0,0 +1,19 @@
++/*
++ * Copyright (C) 2026 Santos Project
++ *
++ * Minimal Mutter Santos Output implementation.
++ */
++
++#pragma once
++
++#include "backends/meta-output.h"
++#include "backends/meta-gpu.h"
++
++#define META_TYPE_OUTPUT_SANTOS (meta_output_santos_get_type ())
++G_DECLARE_FINAL_TYPE (MetaOutputSantos, meta_output_santos,
++                      META, OUTPUT_SANTOS,
++                      MetaOutput)
++
++MetaOutputSantos * meta_output_santos_new (MetaGpu        *gpu,
++                                           uint64_t        id,
++                                           MetaOutputInfo *info);
+diff --git a/src/backends/santos/meta-renderer-display-egl-santos.c b/src/backends/santos/meta-renderer-display-egl-santos.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..f64140c8c7fa1b24b0f1f9b3be6a8bd41c4110dc
+--- /dev/null
++++ b/src/backends/santos/meta-renderer-display-egl-santos.c
+@@ -0,0 +1,176 @@
++/*
++ * Copyright (C) 2026 Santos Project
++ *
++ * Minimal Mutter Santos Display EGL implementation.
++ */
++
++#include "config.h"
++
++#include "cogl/cogl.h"
++#include "backends/santos/meta-renderer-display-egl-santos.h"
++
++#include <EGL/egl.h>
++#include "cogl/cogl-display-egl-private.h"
++#include "cogl/cogl-renderer-egl.h"
++
++struct _MetaRendererDisplayEglSantos
++{
++  CoglDisplayEGL parent;
++};
++
++G_DEFINE_FINAL_TYPE (MetaRendererDisplayEglSantos,
++                     meta_renderer_display_egl_santos,
++                     COGL_TYPE_DISPLAY_EGL)
++
++static int
++meta_renderer_display_egl_santos_add_config_attributes (CoglDisplayEGL *cogl_display_egl,
++                                                        EGLint         *attributes)
++{
++  int i = 0;
++
++  attributes[i++] = EGL_SURFACE_TYPE;
++  attributes[i++] = EGL_WINDOW_BIT;
++  attributes[i++] = EGL_RENDERABLE_TYPE;
++  attributes[i++] = EGL_OPENGL_ES2_BIT;
++
++  return i;
++}
++
++static gboolean
++meta_renderer_display_egl_santos_choose_config (CoglDisplayEGL  *cogl_display_egl,
++                                                EGLint          *attributes,
++                                                EGLConfig       *out_config,
++                                                GError         **error)
++{
++  CoglDisplay *cogl_display = COGL_DISPLAY (cogl_display_egl);
++  CoglRenderer *cogl_renderer = cogl_display_get_renderer (cogl_display);
++  CoglRendererEGL *renderer_egl = COGL_RENDERER_EGL (cogl_renderer);
++  EGLDisplay edpy = cogl_renderer_egl_get_edisplay (renderer_egl);
++  EGLConfig configs[32];
++  EGLint num_configs = 0;
++  static const EGLint config_attribs[] = {
++    EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
++    EGL_RED_SIZE, 8,
++    EGL_GREEN_SIZE, 8,
++    EGL_BLUE_SIZE, 8,
++    EGL_ALPHA_SIZE, 8,
++    EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
++    EGL_NONE
++  };
++
++  if (!eglChooseConfig (edpy, config_attribs, configs, G_N_ELEMENTS (configs), &num_configs) ||
++      num_configs <= 0)
++    {
++      g_set_error (error, COGL_WINSYS_ERROR, COGL_WINSYS_ERROR_CREATE_CONTEXT,
++                   "Failed to choose RGBA8888 window EGLConfig for Santos HWC");
++      return FALSE;
++    }
++
++  *out_config = configs[0];
++  return TRUE;
++}
++
++static EGLSurface
++create_dummy_pbuffer_surface (CoglRendererEGL  *renderer_egl,
++                              GError          **error)
++{
++  EGLConfig pbuffer_config;
++  static const EGLint pbuffer_config_attribs[] = {
++    EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
++    EGL_RED_SIZE, 1,
++    EGL_GREEN_SIZE, 1,
++    EGL_BLUE_SIZE, 1,
++    EGL_ALPHA_SIZE, 0,
++    EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
++    EGL_NONE
++  };
++  static const EGLint pbuffer_attribs[] = {
++    EGL_WIDTH, 16,
++    EGL_HEIGHT, 16,
++    EGL_NONE
++  };
++
++  if (!cogl_renderer_egl_choose_first_config (renderer_egl,
++                                              pbuffer_config_attribs,
++                                              &pbuffer_config,
++                                              error))
++    return EGL_NO_SURFACE;
++
++  return cogl_renderer_egl_create_pbuffer_surface (renderer_egl,
++                                                   pbuffer_config,
++                                                   pbuffer_attribs,
++                                                   error);
++}
++
++static gboolean
++meta_renderer_display_egl_santos_context_created (CoglDisplayEGL  *cogl_display_egl,
++                                                  GError         **error)
++{
++  CoglRenderer *cogl_renderer =
++    cogl_display_get_renderer (COGL_DISPLAY (cogl_display_egl));
++  CoglRendererEGL *renderer_egl = COGL_RENDERER_EGL (cogl_renderer);
++
++  if (!cogl_renderer_egl_has_feature (renderer_egl,
++                                      COGL_EGL_WINSYS_FEATURE_SURFACELESS_CONTEXT))
++    {
++      cogl_display_egl_set_dummy_surface (cogl_display_egl,
++                                          create_dummy_pbuffer_surface (renderer_egl,
++                                                                        error));
++      if (cogl_display_egl_get_dummy_surface (cogl_display_egl) == EGL_NO_SURFACE)
++        return FALSE;
++    }
++
++  if (!cogl_display_egl_make_current (cogl_display_egl,
++                                      cogl_display_egl_get_dummy_surface (cogl_display_egl),
++                                      cogl_display_egl_get_dummy_surface (cogl_display_egl),
++                                      cogl_display_egl_get_egl_context (cogl_display_egl)))
++    {
++      g_set_error (error, COGL_WINSYS_ERROR,
++                   COGL_WINSYS_ERROR_CREATE_CONTEXT,
++                   "Failed to make context current on Santos dummy surface");
++      return FALSE;
++    }
++
++  return TRUE;
++}
++
++static void
++meta_renderer_display_egl_santos_cleanup_context (CoglDisplayEGL *cogl_display_egl)
++{
++  CoglRenderer *cogl_renderer =
++    cogl_display_get_renderer (COGL_DISPLAY (cogl_display_egl));
++
++  if (cogl_display_egl_get_dummy_surface (cogl_display_egl) != EGL_NO_SURFACE)
++    {
++      cogl_renderer_egl_destroy_surface (COGL_RENDERER_EGL (cogl_renderer),
++                                         cogl_display_egl_get_dummy_surface (cogl_display_egl),
++                                         NULL);
++      cogl_display_egl_set_dummy_surface (cogl_display_egl, EGL_NO_SURFACE);
++    }
++}
++
++static void
++meta_renderer_display_egl_santos_init (MetaRendererDisplayEglSantos *display_egl)
++{
++}
++
++static void
++meta_renderer_display_egl_santos_class_init (MetaRendererDisplayEglSantosClass *klass)
++{
++  CoglDisplayEGLClass *egl_class = COGL_DISPLAY_EGL_CLASS (klass);
++
++  egl_class->add_config_attributes = meta_renderer_display_egl_santos_add_config_attributes;
++  egl_class->choose_config = meta_renderer_display_egl_santos_choose_config;
++  egl_class->context_created = meta_renderer_display_egl_santos_context_created;
++  egl_class->cleanup_context = meta_renderer_display_egl_santos_cleanup_context;
++}
++
++MetaRendererDisplayEglSantos *
++meta_renderer_display_egl_santos_new (CoglRenderer *renderer)
++{
++  g_return_val_if_fail (renderer != NULL, NULL);
++
++  return g_object_new (META_TYPE_RENDERER_DISPLAY_EGL_SANTOS,
++                       "renderer", renderer,
++                       NULL);
++}
+diff --git a/src/backends/santos/meta-renderer-display-egl-santos.h b/src/backends/santos/meta-renderer-display-egl-santos.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..e1e97dd9e0d52e81684c32adc7258c00ac3e9038
+--- /dev/null
++++ b/src/backends/santos/meta-renderer-display-egl-santos.h
+@@ -0,0 +1,18 @@
++/*
++ * Copyright (C) 2026 Santos Project
++ *
++ * Minimal Mutter Santos Display EGL implementation.
++ */
++
++#pragma once
++
++#include "cogl/cogl.h"
++#include "cogl/cogl-display-egl.h"
++
++#define META_TYPE_RENDERER_DISPLAY_EGL_SANTOS (meta_renderer_display_egl_santos_get_type ())
++G_DECLARE_FINAL_TYPE (MetaRendererDisplayEglSantos,
++                      meta_renderer_display_egl_santos,
++                      META, RENDERER_DISPLAY_EGL_SANTOS,
++                      CoglDisplayEGL)
++
++MetaRendererDisplayEglSantos * meta_renderer_display_egl_santos_new (CoglRenderer *renderer);
+diff --git a/src/backends/santos/meta-renderer-santos.c b/src/backends/santos/meta-renderer-santos.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..b4164288b2bed9fc6b5b641e95dbb738cff24050
+--- /dev/null
++++ b/src/backends/santos/meta-renderer-santos.c
+@@ -0,0 +1,165 @@
++/*
++ * Copyright (C) 2026 Santos Project
++ *
++ * Minimal Mutter Santos Renderer implementation.
++ */
++
++#include "config.h"
++
++#include "backends/santos/meta-renderer-santos.h"
++#include "backends/santos/meta-onscreen-santos.h"
++#include "backends/santos/meta-frame-clock-driver-santos.h"
++#include "backends/meta-backend-private.h"
++#include "backends/meta-renderer-view.h"
++
++#include <EGL/egl.h>
++#include "cogl/cogl-context-private.h"
++#include "cogl/cogl-display-egl-private.h"
++#include "cogl/cogl-renderer-egl.h"
++
++struct _MetaRendererSantos
++{
++  MetaRenderer parent;
++
++  santos_hwc_t *hwc;
++  MetaSantosFrameClockDriver *driver;
++};
++
++G_DEFINE_FINAL_TYPE (MetaRendererSantos, meta_renderer_santos, META_TYPE_RENDERER)
++
++santos_hwc_t *
++meta_renderer_santos_get_hwc (MetaRendererSantos *renderer_santos)
++{
++  return renderer_santos->hwc;
++}
++
++static CoglRenderer *
++meta_renderer_santos_create_cogl_renderer (MetaRenderer *renderer)
++{
++  CoglRendererEGL *renderer_egl;
++  EGLDisplay edpy;
++
++  renderer_egl = cogl_renderer_egl_new ();
++
++  edpy = eglGetDisplay (EGL_DEFAULT_DISPLAY);
++  if (edpy == EGL_NO_DISPLAY)
++    g_error ("eglGetDisplay failed for Santos HWC");
++
++  cogl_renderer_egl_set_edisplay (renderer_egl, edpy);
++
++  return COGL_RENDERER (renderer_egl);
++}
++
++static MetaRendererView *
++meta_renderer_santos_create_view (MetaRenderer        *renderer,
++                                  MetaLogicalMonitor  *logical_monitor,
++                                  MetaMonitor         *monitor,
++                                  MetaOutput          *output,
++                                  MetaCrtc            *crtc,
++                                  GError             **error)
++{
++  MetaRendererSantos *self = META_RENDERER_SANTOS (renderer);
++  MetaBackend *backend = meta_renderer_get_backend (renderer);
++  ClutterBackend *clutter_backend = meta_backend_get_clutter_backend (backend);
++  CoglContext *cogl_context = clutter_backend_get_cogl_context (clutter_backend);
++  CoglDisplay *cogl_display = cogl_context_get_display (cogl_context);
++  CoglDisplayEGL *cogl_display_egl = COGL_DISPLAY_EGL (cogl_display);
++  MetaOnscreenSantos *onscreen;
++  MetaRendererView *view;
++  MtkRectangle view_layout;
++  EGLSurface egl_surface;
++
++  view_layout = (MtkRectangle) {
++    .x = 0,
++    .y = 0,
++    .width = 1280,
++    .height = 800,
++  };
++
++  onscreen = meta_onscreen_santos_new (self, cogl_context, 1280, 800);
++
++  view = g_object_new (META_TYPE_RENDERER_VIEW,
++                       "name", meta_output_get_name (output),
++                       "backend", backend,
++                       "stage", meta_backend_get_stage (backend),
++                       "layout", &view_layout,
++                       "crtc", crtc,
++                       "scale", 1.0f,
++                       "framebuffer", COGL_FRAMEBUFFER (onscreen),
++                       "use-shadowfb", FALSE,
++                       "transform", MTK_MONITOR_TRANSFORM_NORMAL,
++                       "refresh-rate", 60.0f,
++                       NULL);
++
++  egl_surface = cogl_onscreen_egl_get_egl_surface (COGL_ONSCREEN_EGL (onscreen));
++  cogl_display_egl_make_current (cogl_display_egl,
++                                 egl_surface,
++                                 egl_surface,
++                                 cogl_display_egl_get_egl_context (cogl_display_egl));
++
++  ClutterStageView *stage_view = CLUTTER_STAGE_VIEW (view);
++  ClutterFrameClock *frame_clock = clutter_stage_view_get_frame_clock (stage_view);
++
++  if (self->driver)
++    {
++      meta_santos_frame_clock_driver_detach (self->driver);
++      g_clear_object (&self->driver);
++    }
++
++  self->driver = meta_santos_frame_clock_driver_new (frame_clock, self->hwc);
++  clutter_frame_clock_set_passive (frame_clock,
++                                   CLUTTER_FRAME_CLOCK_DRIVER (self->driver));
++  clutter_frame_clock_schedule_update (frame_clock);
++
++  g_object_unref (onscreen);
++  return view;
++}
++
++static void
++meta_renderer_santos_dispose (GObject *object)
++{
++  MetaRendererSantos *self = META_RENDERER_SANTOS (object);
++
++  if (self->driver)
++    {
++      meta_santos_frame_clock_driver_detach (self->driver);
++      g_clear_object (&self->driver);
++    }
++
++  if (self->hwc)
++    {
++      santos_hwc_destroy (self->hwc);
++      self->hwc = NULL;
++    }
++
++  G_OBJECT_CLASS (meta_renderer_santos_parent_class)->dispose (object);
++}
++
++static void
++meta_renderer_santos_init (MetaRendererSantos *self)
++{
++  self->hwc = santos_hwc_create (FALSE);
++  if (!self->hwc)
++    g_error ("Failed to open Santos HWC display device");
++}
++
++static void
++meta_renderer_santos_class_init (MetaRendererSantosClass *klass)
++{
++  GObjectClass *object_class = G_OBJECT_CLASS (klass);
++  MetaRendererClass *renderer_class = META_RENDERER_CLASS (klass);
++
++  object_class->dispose = meta_renderer_santos_dispose;
++
++  renderer_class->create_cogl_renderer = meta_renderer_santos_create_cogl_renderer;
++  renderer_class->create_view = meta_renderer_santos_create_view;
++}
++
++MetaRendererSantos *
++meta_renderer_santos_new (MetaBackend  *backend,
++                          GError      **error)
++{
++  return g_object_new (META_TYPE_RENDERER_SANTOS,
++                       "backend", backend,
++                       NULL);
++}
+diff --git a/src/backends/santos/meta-renderer-santos.h b/src/backends/santos/meta-renderer-santos.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..12362dbaa598d89b02b8e1c7cd200b6bbc164234
+--- /dev/null
++++ b/src/backends/santos/meta-renderer-santos.h
+@@ -0,0 +1,20 @@
++/*
++ * Copyright (C) 2026 Santos Project
++ *
++ * Minimal Mutter Santos Renderer implementation.
++ */
++
++#pragma once
++
++#include "backends/meta-renderer.h"
++#include "backends/santos/santos_hwc.h"
++
++#define META_TYPE_RENDERER_SANTOS (meta_renderer_santos_get_type ())
++G_DECLARE_FINAL_TYPE (MetaRendererSantos, meta_renderer_santos,
++                      META, RENDERER_SANTOS,
++                      MetaRenderer)
++
++MetaRendererSantos * meta_renderer_santos_new (MetaBackend  *backend,
++                                               GError      **error);
++
++santos_hwc_t * meta_renderer_santos_get_hwc (MetaRendererSantos *renderer_santos);
+diff --git a/src/backends/santos/meta-stage-santos.c b/src/backends/santos/meta-stage-santos.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..a502e806cb4502c3ea406a3aa389a61f1eaaed46
+--- /dev/null
++++ b/src/backends/santos/meta-stage-santos.c
+@@ -0,0 +1,110 @@
++/*
++ * Copyright (C) 2026 Santos Project
++ *
++ * Minimal Mutter Santos Stage implementation.
++ */
++
++#include "config.h"
++
++#include "backends/santos/meta-stage-santos.h"
++#include "backends/meta-backend-private.h"
++#include "backends/meta-renderer.h"
++
++struct _MetaStageSantos
++{
++  MetaStageImpl parent;
++};
++
++G_DEFINE_FINAL_TYPE (MetaStageSantos, meta_stage_santos, META_TYPE_STAGE_IMPL)
++
++static gboolean
++meta_stage_santos_can_clip_redraws (ClutterStageWindow *stage_window)
++{
++  return TRUE;
++}
++
++static void
++meta_stage_santos_get_geometry (ClutterStageWindow *stage_window,
++                                MtkRectangle       *geometry)
++{
++  MetaStageImpl *stage_impl = META_STAGE_IMPL (stage_window);
++  MetaBackend *backend = meta_stage_impl_get_backend (stage_impl);
++  MetaMonitorManager *monitor_manager =
++    meta_backend_get_monitor_manager (backend);
++
++  if (monitor_manager)
++    {
++      int width, height;
++
++      meta_monitor_manager_get_screen_size (monitor_manager, &width, &height);
++      *geometry = (MtkRectangle) {
++        .width = width,
++        .height = height,
++      };
++    }
++  else
++    {
++      *geometry = (MtkRectangle) {
++        .width = 1280,
++        .height = 800,
++      };
++    }
++}
++
++static GList *
++meta_stage_santos_get_views (ClutterStageWindow *stage_window)
++{
++  MetaStageImpl *stage_impl = META_STAGE_IMPL (stage_window);
++  MetaBackend *backend = meta_stage_impl_get_backend (stage_impl);
++  MetaRenderer *renderer = meta_backend_get_renderer (backend);
++
++  return meta_renderer_get_views (renderer);
++}
++
++static void
++meta_stage_santos_redraw_view (ClutterStageWindow *stage_window,
++                               ClutterStageView   *view,
++                               ClutterFrame       *frame)
++{
++  CLUTTER_STAGE_WINDOW_CLASS (meta_stage_santos_parent_class)->
++      redraw_view (stage_window, view, frame);
++
++  if (!clutter_frame_has_result (frame))
++    clutter_frame_set_result (frame, CLUTTER_FRAME_RESULT_PENDING_PRESENTED);
++}
++
++static void
++meta_stage_santos_finish_frame (ClutterStageWindow *stage_window,
++                                ClutterStageView   *stage_view,
++                                ClutterFrame       *frame)
++{
++  if (!clutter_frame_has_result (frame))
++    clutter_frame_set_result (frame, CLUTTER_FRAME_RESULT_IDLE);
++}
++
++static void
++meta_stage_santos_init (MetaStageSantos *self)
++{
++}
++
++static void
++meta_stage_santos_class_init (MetaStageSantosClass *klass)
++{
++  ClutterStageWindowClass *window_class = CLUTTER_STAGE_WINDOW_CLASS (klass);
++
++  window_class->can_clip_redraws = meta_stage_santos_can_clip_redraws;
++  window_class->get_geometry = meta_stage_santos_get_geometry;
++  window_class->get_views = meta_stage_santos_get_views;
++  window_class->redraw_view = meta_stage_santos_redraw_view;
++  window_class->finish_frame = meta_stage_santos_finish_frame;
++}
++
++MetaStageSantos *
++meta_stage_santos_new (MetaBackend  *backend,
++                       ClutterStage *wrapper)
++{
++  return g_object_new (META_TYPE_STAGE_SANTOS,
++                       "backend", backend,
++                       "wrapper", wrapper,
++                       NULL);
++}
+diff --git a/src/backends/santos/meta-stage-santos.h b/src/backends/santos/meta-stage-santos.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..d300016694ec28ecf3150f4155e25e4cf39c7148
+--- /dev/null
++++ b/src/backends/santos/meta-stage-santos.h
+@@ -0,0 +1,18 @@
++/*
++ * Copyright (C) 2026 Santos Project
++ *
++ * Minimal Mutter Santos Stage implementation.
++ */
++
++#pragma once
++
++#include "backends/meta-stage-impl-private.h"
++#include "meta/meta-backend.h"
++
++#define META_TYPE_STAGE_SANTOS (meta_stage_santos_get_type ())
++G_DECLARE_FINAL_TYPE (MetaStageSantos, meta_stage_santos,
++                      META, STAGE_SANTOS,
++                      MetaStageImpl)
++
++MetaStageSantos * meta_stage_santos_new (MetaBackend  *backend,
++                                         ClutterStage *wrapper);
+diff --git a/src/backends/santos/santos_hwc.c b/src/backends/santos/santos_hwc.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..2438c8ba19f35fb140b80aee0b3328c8bcdadf01
+--- /dev/null
++++ b/src/backends/santos/santos_hwc.c
+@@ -0,0 +1,642 @@
++/* SPDX-License-Identifier: MIT */
++/*
++ * Standalone Santos HWC 1.3 display helper implementation.
++ * Direct C extraction of accepted graphics/qt6-hwc/santos.cpp logic.
++ * No Qt dependencies whatsoever.
++ */
++
++#include "santos_hwc.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <fcntl.h>
++#include <errno.h>
++#include <sys/ioctl.h>
++#include <linux/fb.h>
++#include <sync/sync.h>
++#include <inttypes.h>
++#include <glib.h>
++
++#include <hardware/hardware.h>
++#include <hardware/hwcomposer.h>
++#include <hybris/hwcomposerwindow/hwcomposer.h>
++
++struct santos_hwc {
++    hwc_composer_device_1_t *device;
++    hwc_display_contents_1_t *contents[HWC_NUM_DISPLAY_TYPES];
++    hwc_layer_1_t *target_layer;
++    struct ANativeWindow *native_window;
++
++    int32_t width;
++    int32_t height;
++    int32_t vsync_period_ns;
++    int32_t dpi_x;
++    int32_t dpi_y;
++
++    uint32_t vsync_count;
++    uint32_t present_count;
++    uint32_t present_errors;
++    uint32_t retire_waits;
++    uint32_t retire_timeouts;
++    uint32_t retire_timeout_ms;
++
++    uint64_t target_generation;
++    uint64_t completed_generation;
++    bool last_present_success;
++    int last_prepare_rc;
++    int last_set_rc;
++
++    santos_hwc_inject_fault_t inject_fault;
++    uint32_t inject_count;
++    bool enable_runtime_trigger;
++
++    bool vsync_enabled;
++    bool verbose;
++
++    /*
++     * Callback registration is a lifetime contract, not just a pointer
++     * publication.  The HWC callback takes the short global admission lock,
++     * snapshots the callback and data, and accounts for the invocation before
++     * releasing it.  Unregister sets both fields to NULL and waits for that
++     * count to drain before returning.  The callback body never runs under
++     * this lock.
++     */
++    GCond vsync_idle;
++    unsigned int vsync_in_flight;
++    bool vsync_sync_initialized;
++    santos_hwc_vsync_cb_t vsync_cb;
++    void *vsync_cb_data;
++
++    void *user_data;
++};
++
++/* Zero-initialized GMutex is a valid static GLib mutex. */
++static GMutex g_hwc_active_lock;
++static santos_hwc_t *g_hwc_active = NULL;
++
++static void hwc_procs_invalidate(const struct hwc_procs *procs)
++{
++    (void)procs;
++}
++
++static void hwc_procs_hotplug(const struct hwc_procs *procs, int disp, int connected)
++{
++    (void)procs;
++    (void)disp;
++    (void)connected;
++}
++
++static void hwc_procs_vsync(const struct hwc_procs *procs, int disp, int64_t timestamp)
++{
++    santos_hwc_t *ctx;
++    santos_hwc_vsync_cb_t cb;
++    void *data;
++
++    (void)procs;
++    if (disp != 0)
++        return;
++
++    /*
++     * Admission and active-context publication share this short lock.  That
++     * closes the load-before-lock race: close() cannot clear/free the active
++     * context between this snapshot and the in-flight increment.
++     */
++    g_mutex_lock(&g_hwc_active_lock);
++    ctx = g_hwc_active;
++    if (ctx) {
++        __atomic_add_fetch(&ctx->vsync_count, 1u, __ATOMIC_RELAXED);
++
++        cb = ctx->vsync_cb;
++        data = ctx->vsync_cb_data;
++        if (cb)
++            ctx->vsync_in_flight++;
++    }
++    g_mutex_unlock(&g_hwc_active_lock);
++
++    if (!ctx || !cb)
++        return;
++
++    cb(timestamp, data);
++
++    g_mutex_lock(&g_hwc_active_lock);
++    g_assert (ctx->vsync_in_flight > 0);
++    ctx->vsync_in_flight--;
++    if (ctx->vsync_in_flight == 0)
++        g_cond_broadcast(&ctx->vsync_idle);
++    g_mutex_unlock(&g_hwc_active_lock);
++}
++
++static const hwc_procs_t s_hwc_procs = {
++    .invalidate = hwc_procs_invalidate,
++    .vsync = hwc_procs_vsync,
++    .hotplug = hwc_procs_hotplug,
++};
++
++static void santos_hwc_close(santos_hwc_t *ctx);
++
++static void wait_retire(santos_hwc_t *ctx, int retire_fd)
++{
++    if (retire_fd < 0)
++        return;
++    ctx->retire_waits++;
++    const int rc = sync_wait(retire_fd, (int)ctx->retire_timeout_ms);
++    close(retire_fd);
++    if (rc != 0) {
++        ctx->retire_timeouts++;
++        fprintf(stderr, "[SANTOS_HWC] WARN: retire fence wait rc=%d timeout=%ums (timeouts=%u)\n",
++                rc, ctx->retire_timeout_ms, ctx->retire_timeouts);
++    }
++}
++
++static void retire_unconsumed_acquire(santos_hwc_t *ctx,
++                                      struct ANativeWindowBuffer *buffer)
++{
++    const int acquire_fd = ctx->target_layer->acquireFenceFd;
++    int wait_rc = 0;
++
++    /* The synthetic path never called HWC set(), so this fd is still ours. */
++    ctx->target_layer->acquireFenceFd = -1;
++    if (acquire_fd >= 0) {
++        /* Do not make the buffer reusable until the producer has finished. */
++        wait_rc = sync_wait(acquire_fd, -1);
++        close(acquire_fd);
++    }
++
++    /* The fd above is now closed; clear the native slot before reuse. */
++    HWCNativeBufferSetFence(buffer, -1);
++    ctx->target_layer->releaseFenceFd = -1;
++
++    if (wait_rc != 0) {
++        fprintf(stderr,
++                "[SANTOS_HWC] WARN: synthetic acquire fence wait rc=%d fd=%d\n",
++                wait_rc, acquire_fd);
++    }
++}
++
++static void present_callback(void *user_data, struct ANativeWindow *window,
++                             struct ANativeWindowBuffer *buffer)
++{
++    santos_hwc_t *ctx = (santos_hwc_t *)user_data;
++    (void)window;
++
++    int oldRetire = ctx->contents[0]->retireFenceFd;
++    ctx->contents[0]->retireFenceFd = -1;
++    ctx->target_layer->handle = buffer->handle;
++
++    /*
++     * Normative L13 contract:
++     * Producer/acquire fence lives in the native buffer's real fence slot.
++     * HWC set() takes ownership of the acquire fence fd.
++     */
++    ctx->target_layer->acquireFenceFd = HWCNativeBufferGetFence(buffer);
++    ctx->target_layer->releaseFenceFd = -1;
++
++    int rc = 0;
++    if (ctx->inject_count > 0 && ctx->inject_fault == SANTOS_HWC_INJECT_FAIL_PREPARE) {
++        ctx->inject_count--;
++        rc = -1;
++        fprintf(stderr, "[SANTOS_HWC] INJECTED FAULT: simulated prepare failure (remaining=%u)\n",
++                ctx->inject_count);
++    } else {
++        rc = ctx->device->prepare(ctx->device, HWC_NUM_DISPLAY_TYPES, ctx->contents);
++    }
++
++    if (rc) {
++        ctx->present_errors++;
++        ctx->last_prepare_rc = rc;
++        ctx->last_set_rc = 0;
++        ctx->last_present_success = false;
++        ctx->completed_generation = ctx->target_generation;
++        fprintf(stderr, "[SANTOS_HWC] ERROR: prepare failed: %d (frame dropped, errors=%u, gen=%" PRIu64 ")\n",
++                rc, ctx->present_errors, ctx->target_generation);
++        /* A. prepare() failed: set() was never called.  The native buffer
++         * still owns the producer fence; only discard the layer's transient
++         * alias so a closed/stale integer cannot be reused on the next frame.
++         */
++        ctx->target_layer->acquireFenceFd = -1;
++        wait_retire(ctx, oldRetire);
++        return;
++    }
++
++    bool synthetic_set_failure = false;
++    if (ctx->inject_count > 0 && ctx->inject_fault == SANTOS_HWC_INJECT_FAIL_SET) {
++        ctx->inject_count--;
++        rc = -1;
++        synthetic_set_failure = true;
++        fprintf(stderr, "[SANTOS_HWC] INJECTED FAULT: simulated set failure (remaining=%u)\n",
++                ctx->inject_count);
++    } else {
++        rc = ctx->device->set(ctx->device, HWC_NUM_DISPLAY_TYPES, ctx->contents);
++    }
++
++    if (rc) {
++        ctx->present_errors++;
++        ctx->last_prepare_rc = 0;
++        ctx->last_set_rc = rc;
++        ctx->last_present_success = false;
++        ctx->completed_generation = ctx->target_generation;
++        fprintf(stderr, "[SANTOS_HWC] ERROR: set failed: %d (frame dropped, errors=%u, gen=%" PRIu64 ")\n",
++                rc, ctx->present_errors, ctx->target_generation);
++
++        if (synthetic_set_failure) {
++            /*
++             * C. Test-only synthetic pre-set failure: set() was NOT called,
++             * therefore HWC did not consume the acquire fence.  Retire that
++             * producer fence before making the native buffer immediately
++             * reusable, then clear both representations of its state.
++             */
++            retire_unconsumed_acquire(ctx, buffer);
++        } else {
++            /*
++             * B. Real HWC device->set() failure: HWC received ownership of
++             * acquireFenceFd according to the HWC contract.  Do not close or
++             * reuse that integer here; transfer the result fence exactly once
++             * and clear the layer state before the next callback.
++             */
++            const int releaseFd = ctx->target_layer->releaseFenceFd;
++            ctx->target_layer->acquireFenceFd = -1;
++            HWCNativeBufferSetFence(buffer, releaseFd);
++            ctx->target_layer->releaseFenceFd = -1;
++            if (ctx->contents[0]->retireFenceFd >= 0) {
++                close(ctx->contents[0]->retireFenceFd);
++                ctx->contents[0]->retireFenceFd = -1;
++            }
++        }
++        wait_retire(ctx, oldRetire);
++        return;
++    }
++
++    /* Success: replace acquire fence with HWC release fence (or -1) exactly once */
++    const int releaseFd = ctx->target_layer->releaseFenceFd;
++    ctx->target_layer->acquireFenceFd = -1;
++    HWCNativeBufferSetFence(buffer, releaseFd);
++    ctx->target_layer->releaseFenceFd = -1;
++    wait_retire(ctx, oldRetire);
++
++    ctx->last_prepare_rc = 0;
++    ctx->last_set_rc = 0;
++    ctx->last_present_success = true;
++    ctx->completed_generation = ctx->target_generation;
++
++    ctx->present_count++;
++    if (ctx->verbose || ctx->present_count <= 3 || ctx->present_count % 60 == 0) {
++        uint32_t current_vsyncs = __atomic_load_n(&ctx->vsync_count, __ATOMIC_RELAXED);
++        printf("[SANTOS_HWC] present=%u vsync=%u release_fd=%d errors=%u retire_timeouts=%u\n",
++               ctx->present_count, current_vsyncs, releaseFd,
++               ctx->present_errors, ctx->retire_timeouts);
++        fflush(stdout);
++    }
++}
++
++static int santos_hwc_open(santos_hwc_t *ctx, bool verbose)
++{
++    memset(ctx, 0, sizeof(*ctx));
++    g_cond_init(&ctx->vsync_idle);
++    ctx->vsync_sync_initialized = true;
++    ctx->verbose = verbose;
++    int failure_rc;
++
++    /* Timeout configuration */
++    const char *timeout_env = getenv("SANTOS_RETIRE_TIMEOUT_MS");
++    ctx->retire_timeout_ms = (timeout_env && atoi(timeout_env) > 0) ? (uint32_t)atoi(timeout_env) : 1000u;
++
++    /* Fault injection configuration (default OFF) */
++    const char *fault_env = getenv("SANTOS_HWC_INJECT_FAULT");
++    const char *trigger_env = getenv("SANTOS_HWC_ENABLE_FAULT_TRIGGER");
++    ctx->enable_runtime_trigger = (trigger_env && atoi(trigger_env) > 0);
++    if (ctx->enable_runtime_trigger) {
++        fprintf(stderr, "[SANTOS_HWC] Runtime fault trigger enabled via SANTOS_HWC_ENABLE_FAULT_TRIGGER\n");
++    }
++    if (fault_env) {
++        if (strncmp(fault_env, "prepare:", 8) == 0) {
++            ctx->inject_fault = SANTOS_HWC_INJECT_FAIL_PREPARE;
++            ctx->inject_count = (uint32_t)atoi(fault_env + 8);
++            fprintf(stderr, "[SANTOS_HWC] Armed initial fault injection: PREPARE count=%u\n", ctx->inject_count);
++        } else if (strncmp(fault_env, "set:", 4) == 0) {
++            ctx->inject_fault = SANTOS_HWC_INJECT_FAIL_SET;
++            ctx->inject_count = (uint32_t)atoi(fault_env + 4);
++            fprintf(stderr, "[SANTOS_HWC] Armed initial fault injection: SET count=%u\n", ctx->inject_count);
++        }
++    }
++
++    /* Unblank fb0 */
++    int fb_fd = open("/dev/fb0", O_RDWR | O_CLOEXEC);
++    if (fb_fd >= 0) {
++        if (ioctl(fb_fd, FBIOBLANK, 0) < 0) {
++            fprintf(stderr, "[SANTOS_HWC] WARN: FBIOBLANK 0 ioctl failed: %s\n", strerror(errno));
++        }
++        close(fb_fd);
++    }
++
++    const hw_module_t *module = NULL;
++    int err = hw_get_module("hwcomposer", &module);
++    if (err || !module) {
++        fprintf(stderr, "[SANTOS_HWC] FATAL: hw_get_module('hwcomposer') failed: %d (%s)\n",
++                err, strerror(-err));
++        return -1;
++    }
++
++    err = hwc_open_1(module, &ctx->device);
++    if (err || !ctx->device) {
++        fprintf(stderr, "[SANTOS_HWC] FATAL: hwc_open_1 failed: %d\n", err);
++        failure_rc = -2;
++        goto fail;
++    }
++
++    uint32_t configs[5];
++    size_t count = 5;
++    err = ctx->device->getDisplayConfigs(ctx->device, 0, configs, &count);
++    if (err || count == 0) {
++        fprintf(stderr, "[SANTOS_HWC] FATAL: getDisplayConfigs failed: %d, count=%zu\n", err, count);
++        failure_rc = -3;
++        goto fail;
++    }
++
++    const uint32_t attrs[] = {
++        HWC_DISPLAY_WIDTH,
++        HWC_DISPLAY_HEIGHT,
++        HWC_DISPLAY_VSYNC_PERIOD,
++        HWC_DISPLAY_DPI_X,
++        HWC_DISPLAY_DPI_Y,
++        HWC_DISPLAY_NO_ATTRIBUTE
++    };
++    int32_t values[5] = {0};
++    err = ctx->device->getDisplayAttributes(ctx->device, 0, configs[0], attrs, values);
++    if (err || values[0] <= 0 || values[1] <= 0) {
++        fprintf(stderr, "[SANTOS_HWC] FATAL: getDisplayAttributes failed: %d (w=%d, h=%d)\n",
++                err, values[0], values[1]);
++        failure_rc = -4;
++        goto fail;
++    }
++
++    ctx->width = values[0];
++    ctx->height = values[1];
++    ctx->vsync_period_ns = values[2];
++    ctx->dpi_x = values[3];
++    ctx->dpi_y = values[4];
++
++    printf("[SANTOS_HWC] Discovered display: %dx%d @ %d ns/frame (%.2f Hz), dpi=(%d, %d)\n",
++           ctx->width, ctx->height, ctx->vsync_period_ns,
++           (ctx->vsync_period_ns > 0) ? (1e9 / ctx->vsync_period_ns) : 0.0,
++           ctx->dpi_x, ctx->dpi_y);
++
++    if (ctx->device->blank) {
++        err = ctx->device->blank(ctx->device, 0, 0); /* unblank */
++        if (err) {
++            fprintf(stderr, "[SANTOS_HWC] WARN: hwc->blank(0, 0) unblank returned %d\n", err);
++        }
++    }
++
++    if (!ctx->device->registerProcs || !ctx->device->eventControl) {
++        fprintf(stderr, "[SANTOS_HWC] FATAL: vsync hooks missing in HWC device\n");
++        failure_rc = -5;
++        goto fail;
++    }
++
++    /* Allocate HWC contents list for 2 layers (FRAMEBUFFER + FRAMEBUFFER_TARGET) */
++    hwc_display_contents_1_t *list = (hwc_display_contents_1_t *)calloc(
++        1, sizeof(hwc_display_contents_1_t) + 2 * sizeof(hwc_layer_1_t));
++    if (!list) {
++        fprintf(stderr, "[SANTOS_HWC] FATAL: allocation of display contents failed\n");
++        failure_rc = -6;
++        goto fail;
++    }
++
++    ctx->contents[0] = list;
++    list->retireFenceFd = -1;
++    list->flags = HWC_GEOMETRY_CHANGED;
++    list->numHwLayers = 2;
++
++    for (int i = 0; i < 2; ++i) {
++        hwc_layer_1_t *layer = &list->hwLayers[i];
++        layer->compositionType = i ? HWC_FRAMEBUFFER_TARGET : HWC_FRAMEBUFFER;
++        layer->blending = HWC_BLENDING_NONE;
++        layer->sourceCropf.left = 0.0f;
++        layer->sourceCropf.top = 0.0f;
++        layer->sourceCropf.right = (float)ctx->width;
++        layer->sourceCropf.bottom = (float)ctx->height;
++        layer->displayFrame.left = 0;
++        layer->displayFrame.top = 0;
++        layer->displayFrame.right = ctx->width;
++        layer->displayFrame.bottom = ctx->height;
++        layer->visibleRegionScreen.numRects = 1;
++        layer->visibleRegionScreen.rects = &layer->displayFrame;
++        layer->acquireFenceFd = -1;
++        layer->releaseFenceFd = -1;
++    }
++    ctx->target_layer = &list->hwLayers[1];
++
++    /* Create ANativeWindow backed by HWComposerNativeWindow */
++    ctx->native_window = HWCNativeWindowCreate(
++        ctx->width, ctx->height, HAL_PIXEL_FORMAT_RGBA_8888,
++        present_callback, ctx);
++    if (!ctx->native_window) {
++        fprintf(stderr, "[SANTOS_HWC] FATAL: HWCNativeWindowCreate failed\n");
++        failure_rc = -7;
++        goto fail;
++    }
++
++    /*
++     * Do not expose ctx to asynchronous HWC callbacks until every fallible
++     * pre-success allocation/construction path has completed.  Once the
++     * native window exists, callback-owned state is intentionally retained
++     * for process lifetime by santos_hwc_close().
++     */
++    ctx->device->registerProcs(ctx->device, &s_hwc_procs);
++    g_mutex_lock(&g_hwc_active_lock);
++    g_hwc_active = ctx;
++    g_mutex_unlock(&g_hwc_active_lock);
++    err = ctx->device->eventControl(ctx->device, 0, HWC_EVENT_VSYNC, 1);
++    if (err) {
++        fprintf(stderr, "[SANTOS_HWC] WARN: eventControl VSYNC enable returned %d\n", err);
++    } else {
++        ctx->vsync_enabled = true;
++    }
++
++    printf("[SANTOS_HWC] Initialized successfully: %dx%d, ANativeWindow=%p\n",
++           ctx->width, ctx->height, (void *)ctx->native_window);
++    return 0;
++
++fail:
++    santos_hwc_close(ctx);
++    return failure_rc;
++}
++
++void *santos_hwc_get_native_window(santos_hwc_t *ctx)
++{
++    return ctx ? (void *)ctx->native_window : NULL;
++}
++
++static void santos_hwc_close(santos_hwc_t *ctx)
++{
++    if (!ctx)
++        return;
++
++    printf("[SANTOS_HWC] Closing HWC display helper...\n");
++
++    /* Drain any remaining retire fence */
++    if (ctx->contents[0] && ctx->contents[0]->retireFenceFd >= 0) {
++        wait_retire(ctx, ctx->contents[0]->retireFenceFd);
++        ctx->contents[0]->retireFenceFd = -1;
++    }
++
++    /*
++     * Close the active-context admission gate first, then drain callbacks
++     * that already took the snapshot before touching HWC/object lifetime.
++     */
++    g_mutex_lock(&g_hwc_active_lock);
++    if (g_hwc_active == ctx)
++        g_hwc_active = NULL;
++    g_mutex_unlock(&g_hwc_active_lock);
++
++    santos_hwc_set_vsync_callback(ctx, NULL, NULL);
++
++    /* Disable vsync */
++    if (ctx->device && ctx->device->eventControl && ctx->vsync_enabled) {
++        ctx->device->eventControl(ctx->device, 0, HWC_EVENT_VSYNC, 0);
++        ctx->vsync_enabled = false;
++    }
++
++    /*
++     * Once HWCNativeWindowCreate succeeds, the legacy HWC/native-window path
++     * retains the callback and its user data. This is the accepted Qt oracle:
++     * callback-owned ctx, contents, target_layer, device and native_window are
++     * process-lifetime state. Do not free them here and do not invent native
++     * window destruction on this BSP; process termination reclaims them.
++     */
++    if (ctx->native_window) {
++        printf("[SANTOS_HWC] Callback state retained until process exit\n");
++        return;
++    }
++
++    if (ctx->contents[0]) {
++        free(ctx->contents[0]);
++        ctx->contents[0] = NULL;
++        ctx->target_layer = NULL;
++    }
++
++    if (ctx->device) {
++        hwc_close_1(ctx->device);
++        ctx->device = NULL;
++    }
++
++    printf("[SANTOS_HWC] Shutdown complete. Total presents=%u, vsyncs=%u, errors=%u, retire_timeouts=%u\n",
++           ctx->present_count, ctx->vsync_count, ctx->present_errors, ctx->retire_timeouts);
++}
++
++santos_hwc_t *santos_hwc_create(bool verbose)
++{
++    santos_hwc_t *ctx = (santos_hwc_t *)calloc(1, sizeof(*ctx));
++    if (!ctx)
++        return NULL;
++    if (santos_hwc_open(ctx, verbose) != 0) {
++        santos_hwc_destroy(ctx);
++        return NULL;
++    }
++    return ctx;
++}
++
++void santos_hwc_destroy(santos_hwc_t *ctx)
++{
++    if (!ctx)
++        return;
++    santos_hwc_close(ctx);
++    if (!ctx->native_window) {
++        if (ctx->vsync_sync_initialized) {
++            g_cond_clear(&ctx->vsync_idle);
++            ctx->vsync_sync_initialized = false;
++        }
++        free(ctx);
++    }
++}
++
++void santos_hwc_arm_frame(santos_hwc_t *ctx, uint64_t frame_seq)
++{
++    if (!ctx)
++        return;
++    ctx->target_generation = frame_seq;
++    ctx->completed_generation = 0;
++    ctx->last_present_success = false;
++    ctx->last_prepare_rc = 0;
++    ctx->last_set_rc = 0;
++
++    /*
++     * Zero-cost runtime fault trigger:
++     * Only poll filesystem if explicitly enabled via SANTOS_HWC_ENABLE_FAULT_TRIGGER.
++     */
++    if (__builtin_expect(ctx->enable_runtime_trigger, 0) && ctx->inject_count == 0) {
++        FILE *f = fopen("/run/santos_hwc_fault", "r");
++        if (f) {
++            char mode[32] = {0};
++            uint32_t count = 1;
++            if (fscanf(f, "%31s %u", mode, &count) >= 1) {
++                if (count == 0)
++                    count = 1;
++                if (strcmp(mode, "prepare") == 0) {
++                    ctx->inject_fault = SANTOS_HWC_INJECT_FAIL_PREPARE;
++                    ctx->inject_count = count;
++                    fprintf(stderr, "[SANTOS_HWC] Armed fault injection from /run/santos_hwc_fault: PREPARE count=%u\n", count);
++                } else if (strcmp(mode, "set") == 0) {
++                    ctx->inject_fault = SANTOS_HWC_INJECT_FAIL_SET;
++                    ctx->inject_count = count;
++                    fprintf(stderr, "[SANTOS_HWC] Armed fault injection from /run/santos_hwc_fault: SET count=%u\n", count);
++                }
++            }
++            fclose(f);
++            /* Consume only an explicitly enabled test trigger. */
++            unlink("/run/santos_hwc_fault");
++        }
++    }
++}
++
++bool santos_hwc_end_frame(santos_hwc_t *ctx, uint64_t frame_seq)
++{
++    if (!ctx)
++        return false;
++
++    /* Verify that the completed callback strictly matches this frame's generation */
++    if (ctx->completed_generation != frame_seq) {
++        fprintf(stderr, "[SANTOS_HWC] Generation mismatch: expected %" PRIu64 ", completed %" PRIu64 "\n",
++                frame_seq, ctx->completed_generation);
++        return false;
++    }
++
++    bool success = ctx->last_present_success;
++    /* Consume and reset so no subsequent frame can reuse stale status */
++    ctx->target_generation = 0;
++    ctx->completed_generation = 0;
++    ctx->last_present_success = false;
++
++    return success;
++}
++
++void santos_hwc_inject_fault(santos_hwc_t *ctx, santos_hwc_inject_fault_t fault, uint32_t count)
++{
++    if (!ctx)
++        return;
++    ctx->inject_fault = fault;
++    ctx->inject_count = count;
++}
++
++void santos_hwc_set_vsync_callback(santos_hwc_t *ctx, santos_hwc_vsync_cb_t cb, void *user_data)
++{
++    if (!ctx || !ctx->vsync_sync_initialized)
++        return;
++
++    /*
++     * Publish NULL first even when replacing a callback.  That closes the
++     * admission gate, drains already admitted callbacks, and avoids waiting
++     * forever while a continuously-running provider admits replacements.
++     * Only then publish the new callback/data pair.
++     */
++    g_mutex_lock(&g_hwc_active_lock);
++    ctx->vsync_cb = NULL;
++    ctx->vsync_cb_data = NULL;
++    while (ctx->vsync_in_flight != 0)
++        g_cond_wait(&ctx->vsync_idle, &g_hwc_active_lock);
++    ctx->vsync_cb_data = user_data;
++    ctx->vsync_cb = cb;
++    g_mutex_unlock(&g_hwc_active_lock);
++}
+diff --git a/src/backends/santos/santos_hwc.h b/src/backends/santos/santos_hwc.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..fae979fb4ba8983748b2975063541d07100249b9
+--- /dev/null
++++ b/src/backends/santos/santos_hwc.h
+@@ -0,0 +1,46 @@
++/*
++ * Santos HWC helper for Mutter display backend
++ */
++
++#ifndef SANTOS_HWC_H
++#define SANTOS_HWC_H
++
++#include <stdint.h>
++#include <stdbool.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef struct santos_hwc santos_hwc_t;
++
++typedef enum {
++    SANTOS_HWC_INJECT_NONE = 0,
++    SANTOS_HWC_INJECT_FAIL_PREPARE = 1,
++    /* Test-only pre-set failure; never calls device->set(). */
++    SANTOS_HWC_INJECT_FAIL_SET = 2,
++} santos_hwc_inject_fault_t;
++
++santos_hwc_t *santos_hwc_create(bool verbose);
++void *santos_hwc_get_native_window(santos_hwc_t *ctx);
++void santos_hwc_destroy(santos_hwc_t *ctx);
++
++void santos_hwc_arm_frame(santos_hwc_t *ctx, uint64_t frame_seq);
++bool santos_hwc_end_frame(santos_hwc_t *ctx, uint64_t frame_seq);
++void santos_hwc_inject_fault(santos_hwc_t *ctx, santos_hwc_inject_fault_t fault, uint32_t count);
++
++typedef void (*santos_hwc_vsync_cb_t)(int64_t timestamp_ns, void *user_data);
++
++/*
++ * Registration is synchronized with hwc_procs_vsync(): setting cb to NULL
++ * closes callback admission and waits until every callback that already
++ * admitted itself has returned.  The callback body runs outside the
++ * registration lock, so the caller must not unregister from inside cb.
++ */
++void santos_hwc_set_vsync_callback(santos_hwc_t *ctx, santos_hwc_vsync_cb_t cb, void *user_data);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* SANTOS_HWC_H */
+diff --git a/src/compositor/meta-compositor-server.c b/src/compositor/meta-compositor-server.c
+index c5bf3cab89cde1a5ad3a922bbbd968640f184267..8360f395fff36b460cb9af5d234e3b4538a3a62c 100644
+--- a/src/compositor/meta-compositor-server.c
++++ b/src/compositor/meta-compositor-server.c
+@@ -27,6 +27,16 @@
+ 
+ G_DEFINE_TYPE (MetaCompositorServer, meta_compositor_server, META_TYPE_COMPOSITOR)
+ 
++MetaCompositorServer *
++meta_compositor_server_new (MetaDisplay *display,
++                            MetaBackend *backend)
++{
++  return g_object_new (META_TYPE_COMPOSITOR_SERVER,
++                       "display", display,
++                       "backend", backend,
++                       NULL);
++}
++
+ static gboolean
+ meta_compositor_server_manage (MetaCompositor  *compositor,
+                                GError         **error)
+diff --git a/src/compositor/meta-compositor-server.h b/src/compositor/meta-compositor-server.h
+index cb532f98fbe612a31d98a9061a29d66a584631e2..4a769ad7f4051beaea25d5c2ab602458fb5f623c 100644
+--- a/src/compositor/meta-compositor-server.h
++++ b/src/compositor/meta-compositor-server.h
+@@ -24,6 +24,9 @@
+ G_DECLARE_DERIVABLE_TYPE (MetaCompositorServer, meta_compositor_server,
+                           META, COMPOSITOR_SERVER, MetaCompositor)
+ 
++MetaCompositorServer * meta_compositor_server_new (MetaDisplay *display,
++                                                   MetaBackend *backend);
++
+ struct _MetaCompositorServerClass
+ {
+   MetaCompositorClass parent_class;
+diff --git a/src/core/display.c b/src/core/display.c
+index 45b860eb8e62c9c82b59ea710397e8a62019610b..7c6611b0fe18be5e7622b5f8236db0ca549f57ac 100644
+--- a/src/core/display.c
++++ b/src/core/display.c
+@@ -41,6 +41,7 @@
+ #include "backends/meta-input-device-private.h"
+ #include "backends/meta-input-mapper-private.h"
+ #include "backends/meta-stage-private.h"
++#include "backends/santos/meta-backend-santos.h"
+ #include "compositor/compositor-private.h"
+ #include "compositor/meta-compositor-native.h"
+ #include "compositor/meta-compositor-server.h"
+@@ -581,6 +582,9 @@ create_compositor (MetaDisplay *display)
+   if (META_IS_BACKEND_NATIVE (backend))
+     return META_COMPOSITOR (meta_compositor_native_new (display, backend));
+ 
++  if (META_IS_BACKEND_SANTOS (backend))
++    return META_COMPOSITOR (meta_compositor_server_new (display, backend));
++
+   g_assert_not_reached ();
+ }
+ 
+diff --git a/src/core/meta-context-main.c b/src/core/meta-context-main.c
+index e40394b368fb31fb0c6b2be8e40384a27d752f0c..6bcddf2ae48cd13b94cb2151b1a66a687d369e35 100644
+--- a/src/core/meta-context-main.c
++++ b/src/core/meta-context-main.c
+@@ -30,6 +30,7 @@
+ #include "backends/meta-monitor-private.h"
+ #include "backends/meta-monitor-manager-private.h"
+ #include "backends/meta-virtual-monitor.h"
++#include "backends/santos/meta-backend-santos.h"
+ #include "core/meta-session-manager.h"
+ #include "meta/meta-backend.h"
+ #include "wayland/meta-wayland.h"
+@@ -48,6 +49,7 @@ typedef struct _MetaContextMainOptions
+   char *wayland_display;
+   gboolean display_server;
+   gboolean headless;
++  gboolean santos;
+   gboolean devkit;
+   char *devkit_args;
+   GList *virtual_monitor_infos;
+@@ -264,6 +266,15 @@ meta_context_main_create_backend (MetaContext  *context,
+ {
+   MetaContextMain *context_main = META_CONTEXT_MAIN (context);
+ 
++  if (context_main->options.santos ||
++      g_strcmp0 (g_getenv ("MUTTER_BACKEND"), "santos") == 0)
++    {
++      return g_initable_new (META_TYPE_BACKEND_SANTOS,
++                             NULL, error,
++                             "context", context,
++                             NULL);
++    }
++
+   if (context_main->options.headless ||
+       context_main->options.devkit)
+     return create_headless_backend (context, error);
+@@ -368,6 +379,11 @@ meta_context_main_add_option_entries (MetaContextMain *context_main)
+       &context_main->options.headless,
+       N_("Run as a headless display server")
+     },
++    {
++      "santos", 0, 0, G_OPTION_ARG_NONE,
++      &context_main->options.santos,
++      N_("Run with Santos HWC display backend")
++    },
+     {
+       "virtual-monitor", 0, 0, G_OPTION_ARG_CALLBACK,
+       add_virtual_monitor_cb,
+diff --git a/src/meson.build b/src/meson.build
+index 60970cefee13dc10de9f782baa9f44a19ea39088..9e06566a73427625df18ddf396e3579042b550d7 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -112,11 +112,35 @@ if have_xwayland
+   ]
+ endif
+ 
++santos_hwc_lib = static_library('santos_hwc',
++  'backends/santos/santos_hwc.c',
++  include_directories: mutter_includes,
++  dependencies: [
++    glib_dep,
++  ],
++  c_args: [
++    '-I/usr/include/android-7.1',
++    '-I/usr/include/santos-hybris',
++  ],
++)
++
++santos_dep = declare_dependency(
++  link_with: santos_hwc_lib,
++  link_args: [
++    '-L/usr/lib/santos-hybris',
++    '-Wl,-rpath,/usr/lib/santos-hybris',
++    '-lhybris-hwcomposerwindow',
++    '-lhardware',
++    '-lsync',
++  ],
++)
++
+ mutter_pkg_private_deps += [
+   logind_dep,
+   libinput_dep,
+   libgbm_dep,
+   xkbcommon_dep,
++  santos_dep,
+ ]
+ 
+ mutter_deps = [
+@@ -138,6 +162,29 @@ if get_option('verbose')
+ endif
+ 
+ mutter_sources = [
++  'backends/santos/santos_hwc.h',
++  'backends/santos/meta-crtc-santos.c',
++  'backends/santos/meta-crtc-santos.h',
++  'backends/santos/meta-output-santos.c',
++  'backends/santos/meta-output-santos.h',
++  'backends/santos/meta-gpu-santos.c',
++  'backends/santos/meta-gpu-santos.h',
++  'backends/santos/meta-renderer-display-egl-santos.c',
++  'backends/santos/meta-renderer-display-egl-santos.h',
++  'backends/santos/meta-onscreen-santos.c',
++  'backends/santos/meta-onscreen-santos.h',
++  'backends/santos/meta-stage-santos.c',
++  'backends/santos/meta-stage-santos.h',
++  'backends/santos/meta-clutter-backend-santos.c',
++  'backends/santos/meta-clutter-backend-santos.h',
++  'backends/santos/meta-renderer-santos.c',
++  'backends/santos/meta-renderer-santos.h',
++  'backends/santos/meta-frame-clock-driver-santos.c',
++  'backends/santos/meta-frame-clock-driver-santos.h',
++  'backends/santos/meta-monitor-manager-santos.c',
++  'backends/santos/meta-monitor-manager-santos.h',
++  'backends/santos/meta-backend-santos.c',
++  'backends/santos/meta-backend-santos.h',
+   'backends/edid.h',
+   'backends/edid-parse.c',
+   'backends/meta-a11y-manager.c',
+@@ -345,6 +392,8 @@ mutter_sources = [
+   'core/meta-selection.c',
+   'core/meta-selection-source.c',
+   'core/meta-selection-source-memory.c',
++  'core/meta-selection-source-remote.c',
++  'core/meta-selection-source-remote.h',
+   'core/meta-session-manager.c',
+   'core/meta-session-state.c',
+   'core/meta-sound-player.c',
+@@ -470,8 +519,6 @@ if have_remote_desktop
+     'backends/meta-stream-window.h',
+     'backends/meta-stream.c',
+     'backends/meta-stream.h',
+-    'core/meta-selection-source-remote.c',
+-    'core/meta-selection-source-remote.h',
+   ]
+ endif
+ 
+diff --git a/src/wayland/meta-wayland-touch.c b/src/wayland/meta-wayland-touch.c
+index 6ca88594a09a8b87eff363065fa320824fc99601..6ad9518f7e2b67e53bbb27282ca0c2f21c071ea4 100644
+--- a/src/wayland/meta-wayland-touch.c
++++ b/src/wayland/meta-wayland-touch.c
+@@ -150,7 +150,12 @@ touch_handle_surface_destroy (struct wl_listener *listener, void *data)
+   while (g_hash_table_iter_next (&iter, NULL, (gpointer*) &touch_info))
+     {
+       if (touch_info->focus_surface == touch_surface)
+-        g_hash_table_iter_remove (&iter);
++        {
++          if (touch->latest_touch_down_serial == touch_info->slot_serial)
++            touch->latest_touch_down_serial = 0;
++          touch_info->slot_serial = 0;
++          g_hash_table_iter_remove (&iter);
++        }
+     }
+ 
+   /* Ensure the surface no longer exists */
+@@ -590,7 +595,11 @@ meta_wayland_touch_cancel (MetaWaylandTouch *touch)
+ 
+   g_hash_table_iter_init (&iter, touch->touches);
+   while (g_hash_table_iter_next (&iter, NULL, (gpointer*) &touch_info))
+-    g_clear_pointer (&touch_info->focus_surface, touch_surface_decrement_touch);
++    {
++      touch_info->slot_serial = 0;
++      g_clear_pointer (&touch_info->focus_surface, touch_surface_decrement_touch);
++    }
++  touch->latest_touch_down_serial = 0;
+   g_list_free (surfaces);
+ }
+ 
+@@ -638,16 +647,19 @@ meta_wayland_touch_can_popup (MetaWaylandTouch *touch,
+   MetaWaylandTouchInfo *touch_info;
+   GHashTableIter iter;
+ 
+-  if (!touch->touches)
++  if (!touch->touches || serial == 0)
+     return FALSE;
+ 
+-  if (touch->latest_touch_down_serial == serial)
++  if (touch->latest_touch_down_serial != 0 &&
++      touch->latest_touch_down_serial == serial)
+     return TRUE;
+ 
+   g_hash_table_iter_init (&iter, touch->touches);
+   while (g_hash_table_iter_next (&iter, NULL, (gpointer*) &touch_info))
+     {
+-      if (touch_info->slot_serial == serial)
++      if (touch_info->focus_surface &&
++          touch_info->slot_serial != 0 &&
++          touch_info->slot_serial == serial)
+         return TRUE;
+     }
+   return FALSE;
+@@ -659,6 +671,9 @@ touch_can_grab_surface (MetaWaylandTouchInfo *touch_info,
+ {
+   MetaWaylandSurface *subsurface;
+ 
++  if (!touch_info || !touch_info->focus_surface || !surface)
++    return FALSE;
++
+   if (touch_info->focus_surface->surface == surface)
+     return TRUE;
+ 
+@@ -682,7 +697,7 @@ meta_wayland_touch_find_grab_sequence (MetaWaylandTouch    *touch,
+   ClutterEventSequence *sequence;
+   GHashTableIter iter;
+ 
+-  if (!touch->touches)
++  if (!touch->touches || serial == 0 || !surface)
+     return NULL;
+ 
+   g_hash_table_iter_init (&iter, touch->touches);
+@@ -690,7 +705,8 @@ meta_wayland_touch_find_grab_sequence (MetaWaylandTouch    *touch,
+   while (g_hash_table_iter_next (&iter, (gpointer*) &sequence,
+                                  (gpointer*) &touch_info))
+     {
+-      if (touch_info->slot_serial == serial &&
++      if (touch_info->slot_serial != 0 &&
++          touch_info->slot_serial == serial &&
+           touch_can_grab_surface (touch_info, surface))
+         {
+           if (sprite_out)

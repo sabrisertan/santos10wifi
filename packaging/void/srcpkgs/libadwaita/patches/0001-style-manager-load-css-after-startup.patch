@@ -1,0 +1,33 @@
+From 6935ac178412b7464325f0b816486327e174ffbf Mon Sep 17 00:00:00 2001
+From: Alice Mikhaylenko <alicem@gnome.org>
+Date: Sun, 28 Jun 2026 14:04:50 +0400
+Subject: [PATCH] style-manager: Load CSS after setting properties on startup
+
+This way we only load it once instead of potentially 4 times with dark
+style+high contrast+reduced motion.
+
+--- a/src/adw-style-manager.c
++++ b/src/adw-style-manager.c
+@@ -457,8 +457,6 @@ adw_style_manager_constructed (GObject *object)
+                     NULL);
+ 
+       self->provider = gtk_css_provider_new ();
+-      gtk_css_provider_load_from_resource (self->provider,
+-                                           "/org/gnome/Adwaita/styles/gtk.css");
+       gtk_style_context_add_provider_for_display (self->display,
+                                                   GTK_STYLE_PROVIDER (self->provider),
+                                                   GTK_STYLE_PROVIDER_PRIORITY_THEME);
+@@ -531,6 +529,11 @@ adw_style_manager_constructed (GObject *object)
+   update_dark (self);
+   update_fonts (self);
+   update_stylesheet (self, UPDATE_ALL);
++
++  if (self->provider) {
++    gtk_css_provider_load_from_resource (self->provider,
++                                         "/org/gnome/Adwaita/styles/gtk.css");
++  }
+ }
+ 
+ static void
+-- 
+2.39.2

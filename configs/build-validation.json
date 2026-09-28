@@ -1,0 +1,22 @@
+{
+  "build_exit": 0,
+  "command": "JOBS=16 tools/build-kernel.sh PREPARED_KERNEL NEW_BUILD_DIR",
+  "release": "7.2.0-00698-g92b0083794ca-santos-preview",
+  "compiler": "gcc (GCC) 16.2.1 20260819 (Red Hat 16.2.1-2)",
+  "artifacts": {
+    ".config": "0c712d8400865208362df9f1e80dc3781c5c9959b9f2fab21fa8999cfa90db54",
+    "arch/x86/boot/bzImage": "dcae476119a2d322e45d587ec2301f036370f8f001878218fb7901f48775d396",
+    "pvr/santos-gfx-pwr.ko": "ba6f04fb31e81debf834d2c1254cf40dba6be066932c61528407b0fcae0f945f",
+    "pvr/santos-pmu-preinit.ko": "5032e4c6d71b1702e18d5869e453cb1f7229fe8ac93ca15195dd4a1bf86f09b2",
+    "pvr/santos-pvr-power.ko": "77dd6a9bf05bf82b45712f3a91eb59801ef48be062b13b5866cda8cf6dc9f430",
+    "pvr/santos-pvr-shell.ko": "fb1a49167e592c0d87700b9ea895cec8a9453f56d2f58bb8023b81a2d3b67f6e",
+    "pvr/santos-pvr112.ko": "7118962cc2e5db3123c7210bda3f07ca902be04aaebcf99542b38aec917f47eb",
+    "pvr/santos-sgx-one.ko": "33f919724d8ef084e2a2a8178511aea7dc7b630286c544d59dc621c2e0b9ffc1",
+    "pvr/santos-sgx-wa.ko": "91a6871b6cb61bc93bf22398100428ba3dc0feada03e5b8bded71fe0b6ccc457",
+    "vdx/santos-pvr-shell-vdx.ko": "90ae24aa7a76b8d35cfd723931188566f255bdeba69d58bd53630034c6198b45",
+    "vdx/santos-vdx-gate1.ko": "14fe22ce387b29b9557eb6523e9179accffeeb04cc05eba7c72438a9f511743b",
+    "vdx/santos-vdx-shell.ko": "89de2f316dc18be339d5d6f42bb9f87d68579fd4418db98a2806eee3a69a91e7",
+    "vdx/santos-vdx.ko": "4687b7cc402ab8c05015b0ec290f76c969310986a3481c5b4e61f4acb8649750"
+  },
+  "runtime_tested": false
+}

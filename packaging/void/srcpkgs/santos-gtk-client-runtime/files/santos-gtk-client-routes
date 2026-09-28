@@ -1,0 +1,444 @@
+#!/usr/bin/python3
+"""Inspect and manage the session-scoped Santos GTK4 client routes.
+
+The package owns immutable templates. This tool only creates/removes explicitly
+named session-local symlinks; it never rewrites vendor desktop or D-Bus files.
+"""
+import argparse
+import configparser
+import hashlib
+import json
+import os
+import pwd
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+PACKAGE = Path('/usr/lib/santos-gtk-client-runtime')
+BIN_DIR = PACKAGE / 'bin'
+SHARE_DIR = PACKAGE / 'share'
+APPLICATION_DIR = SHARE_DIR / 'applications'
+SERVICE_DIR = SHARE_DIR / 'dbus-1' / 'services'
+PROFILE = Path('/etc/santos/gtk4-client.ini')
+HELPER = Path('/usr/libexec/santos-client-environment')
+RUNTIME = Path('/usr/lib/santos-gtk-runtime')
+STATE = Path('/var/lib/santos-gtk-client-runtime')
+BACKUP = STATE / 'backup'
+MANIFEST = STATE / 'session-manifest.json'
+COMPAT_DIR = Path('/usr/local/bin')
+COMPAT_DESKTOP_DIR = Path('/home/santos/.local/share/applications')
+USER = 'santos'
+
+GTK4_APPS = {
+    'org.gnome.Settings.desktop': '/usr/bin/gnome-control-center',
+    'org.gnome.Nautilus.desktop': '/usr/bin/nautilus',
+    'org.gnome.TextEditor.desktop': '/usr/bin/gnome-text-editor',
+    'org.gnome.Calculator.desktop': '/usr/bin/gnome-calculator',
+    'org.gnome.Ptyxis.desktop': '/usr/bin/ptyxis',
+}
+GTK4_SERVICES = {
+    'org.gnome.Settings.service': ('org.gnome.Settings', '/usr/bin/gnome-control-center', []),
+    'org.gnome.Nautilus.service': ('org.gnome.Nautilus', '/usr/bin/nautilus', ['--gapplication-service']),
+    'org.freedesktop.FileManager1.service': ('org.freedesktop.FileManager1', '/usr/bin/nautilus', ['--gapplication-service']),
+    'org.gnome.TextEditor.service': ('org.gnome.TextEditor', '/usr/bin/gnome-text-editor', ['--gapplication-service']),
+    'org.gnome.Ptyxis.service': ('org.gnome.Ptyxis', '/usr/bin/ptyxis', ['--gapplication-service']),
+}
+GTK4_BIN_NAMES = ('gnome-control-center', 'nautilus', 'gnome-text-editor',
+                  'gnome-calculator', 'ptyxis')
+EOG_BIN = 'eog'
+PRIVATE_ENV = (
+    'GDK_BACKEND', 'GSK_RENDERER', 'GDK_DISABLE', 'LD_LIBRARY_PATH', 'LD_PRELOAD',
+    'LIBEGL', 'LIBGLESV2', 'HYBRIS_ANDROID_SDK_VERSION', 'HYBRIS_LINKER_DIR',
+    'HYBRIS_EGLPLATFORM', 'HYBRIS_EGLPLATFORM_DIR', 'EGL_PLATFORM',
+    'SANTOS_EGL_PLATFORM', 'ANDROID_ROOT', 'ANDROID_DATA', 'LD_SHIM_LIBS',
+)
+EXPECTED_LINKS = {
+    'libgtk-4.so.1': '/opt/gtk422-santos/libgtk-4.so.1.2200.4.santos',
+    'libwayland-egl.so.1': '/root/santos/hybris-wayland/lib/libwayland-egl.so.1',
+    'libhybris-eglplatformcommon.so.1':
+        '/root/santos/hybris-wayland/lib/libhybris-eglplatformcommon.so.1',
+    'libEGL.so.1': '/usr/lib/santos-hybris/libEGL.so.1.0.0',
+    'libGLESv2.so.2': '/usr/lib/santos-hybris/libGLESv2.so.2.0.0',
+    'libhardware.so.2': '/usr/lib/santos-hybris/libhardware.so.2.0.0',
+    'libhybris-common.so.1': '/usr/lib/santos-hybris/libhybris-common.so.1.0.0',
+    'libgralloc.so.1': '/usr/lib/santos-hybris/libgralloc.so.1.0.0',
+    'libsync.so.2': '/usr/lib/santos-hybris/libsync.so.2.0.0',
+}
+
+
+class RouteError(RuntimeError):
+    pass
+
+
+def fail(message):
+    raise RouteError(message)
+
+
+def atomic_write(path, content, mode=0o644, uid=0, gid=0):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f'.{path.name}.santos-', dir=str(path.parent))
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, mode)
+        os.chown(temporary, uid, gid)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def load_manifest():
+    if not MANIFEST.exists():
+        return {'version': 2, 'runtime_services': [], 'compat': [], 'desktops': []}
+    try:
+        data = json.loads(MANIFEST.read_text())
+    except (OSError, ValueError) as exc:
+        fail(f'cannot read {MANIFEST}: {exc}')
+    if data.get('version') != 2:
+        fail(f'unsupported route manifest version: {data.get("version")}')
+    data.setdefault('desktops', [])
+    return data
+
+
+def save_manifest(data):
+    STATE.mkdir(parents=True, exist_ok=True)
+    os.chmod(STATE, 0o700)
+    atomic_write(MANIFEST, json.dumps(data, indent=2, sort_keys=True) + '\n', 0o600)
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def profile_values():
+    if not PROFILE.is_file():
+        fail(f'profile missing: {PROFILE}')
+    config = configparser.ConfigParser(interpolation=None)
+    config.optionxform = str
+    try:
+        with PROFILE.open() as stream:
+            config.read_file(stream)
+        values = dict(config['Environment'])
+    except (OSError, KeyError, configparser.Error) as exc:
+        fail(f'cannot parse {PROFILE}: {exc}')
+    if values.get('LD_LIBRARY_PATH') != '/usr/lib/santos-gtk-runtime':
+        fail('profile LD_LIBRARY_PATH is not the scoped resolver')
+    if values.get('GSK_RENDERER') != 'santosgl' or values.get('GDK_BACKEND') != 'wayland':
+        fail('profile renderer/backend contract changed')
+    if values.get('HYBRIS_LINKER_DIR') != '/usr/lib/santos-hybris/libhybris/linker':
+        fail('profile HYBRIS_LINKER_DIR changed')
+    if values.get('HYBRIS_EGLPLATFORM') != 'wayland' or values.get('EGL_PLATFORM') != 'wayland':
+        fail('profile Wayland/hybris contract changed')
+    if len([item for item in values.get('LD_PRELOAD', '').split(':') if item]) != 5:
+        fail('profile preload count changed')
+    return values
+
+
+def check_resolver():
+    if not RUNTIME.is_dir():
+        fail(f'resolver directory missing: {RUNTIME}')
+    actual = {entry.name for entry in RUNTIME.iterdir()}
+    expected = set(EXPECTED_LINKS)
+    if actual != expected:
+        fail(f'resolver entry set mismatch: expected {sorted(expected)}, got {sorted(actual)}')
+    for name, target in EXPECTED_LINKS.items():
+        link = RUNTIME / name
+        if not link.is_symlink() or os.path.realpath(link) != os.path.realpath(target):
+            fail(f'resolver link mismatch: {link}')
+        if not Path(target).is_file():
+            fail(f'resolver target missing: {target}')
+    if (RUNTIME / 'n.so').exists() or (RUNTIME / 'n.so').is_symlink():
+        fail('n.so must remain path-only through HYBRIS_LINKER_DIR')
+
+
+def check_no_global_loader_entry():
+    paths = [Path('/etc/ld.so.conf')]
+    paths.extend(sorted(Path('/etc/ld.so.conf.d').glob('*.conf')))
+    for path in paths:
+        if path.is_file() and 'santos-gtk-runtime' in path.read_text(errors='replace'):
+            fail(f'global loader configuration contains client resolver: {path}')
+
+
+def check_templates():
+    for name in GTK4_APPS:
+        path = APPLICATION_DIR / name
+        if not path.is_file():
+            fail(f'package desktop template missing: {path}')
+        text = path.read_text()
+        if 'LD_LIBRARY_PATH' in text or '/root/santos-client-environment' in text:
+            fail(f'desktop template contains an old/embedded policy: {path}')
+        if '/usr/libexec/santos-client-environment' not in text or 'DBusActivatable=false' not in text:
+            fail(f'desktop template is not the helper route: {path}')
+    eog = APPLICATION_DIR / 'org.gnome.eog.desktop'
+    if not eog.is_file() or '/usr/lib/santos-gtk-client-runtime/bin/eog' not in eog.read_text():
+        fail('EOG clean GTK3 template missing')
+    if '/usr/libexec/santos-client-environment' in eog.read_text():
+        fail('EOG template must not use the GTK4 helper')
+    for name, (bus_name, real, args) in GTK4_SERVICES.items():
+        path = SERVICE_DIR / name
+        if not path.is_file():
+            fail(f'package D-Bus template missing: {path}')
+        text = path.read_text()
+        if f'Name={bus_name}' not in text or '/usr/libexec/santos-client-environment' not in text or real not in text:
+            fail(f'D-Bus template contract mismatch: {path}')
+        if '--gapplication-service' in args and '--gapplication-service' not in text:
+            fail(f'D-Bus service argument missing: {path}')
+    for name in GTK4_BIN_NAMES:
+        path = BIN_DIR / name
+        if not path.is_file() or not os.access(path, os.X_OK):
+            fail(f'package PATH wrapper missing: {path}')
+    eog = BIN_DIR / EOG_BIN
+    if not eog.is_file() or not os.access(eog, os.X_OK) or '/usr/bin/eog' not in eog.read_text():
+        fail('package EOG clean wrapper missing')
+
+
+def preflight():
+    if os.geteuid() != 0:
+        fail('route manager must run as root')
+    profile_values()
+    if not HELPER.is_file() or not os.access(HELPER, os.X_OK):
+        fail(f'helper missing or not executable: {HELPER}')
+    check_resolver()
+    check_no_global_loader_entry()
+    check_templates()
+
+
+def backup_existing(path):
+    """Back up a pre-existing local overlay file before replacing it."""
+    if not path.exists() and not path.is_symlink():
+        return {'path': str(path), 'existed': False}
+    BACKUP.mkdir(parents=True, exist_ok=True)
+    name = hashlib.sha256(str(path).encode()).hexdigest() + '-' + path.name
+    backup = BACKUP / name
+    if path.is_symlink():
+        os.symlink(os.readlink(path), backup)
+        return {'path': str(path), 'existed': True, 'kind': 'symlink', 'backup': str(backup)}
+    shutil.copy2(path, backup)
+    info = path.stat()
+    return {'path': str(path), 'existed': True, 'kind': 'file', 'backup': str(backup),
+            'mode': stat.S_IMODE(info.st_mode), 'uid': info.st_uid, 'gid': info.st_gid}
+
+
+def install_link(path, target, manifest, key):
+    path = Path(path)
+    target = str(target)
+    if path.is_symlink() and os.path.realpath(path) == os.path.realpath(target):
+        return False
+    if path.exists() or path.is_symlink():
+        fail(f'route path already exists and is not the expected link: {path}')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.symlink(target, path)
+    manifest[key].append({'path': str(path), 'target': target, 'created': True})
+    return True
+
+
+def install_compat_link(path, target, manifest):
+    path = Path(path)
+    target = str(target)
+    if path.is_symlink() and os.path.realpath(path) == os.path.realpath(target):
+        return
+    entry = {'path': str(path), 'target': target, 'created': True}
+    if path.exists() or path.is_symlink():
+        text = path.read_text(errors='replace') if path.is_file() else ''
+        if not any(marker in text for marker in ('santos-client-environment', 'santos-gtk-client-runtime')):
+            fail(f'unknown existing compatibility command: {path}')
+        entry.update(backup_existing(path))
+        if path.is_dir():
+            fail(f'compatibility path is a directory: {path}')
+        path.unlink()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.symlink(target, path)
+    manifest['compat'].append(entry)
+
+
+def install_compat_desktop(path, source, manifest):
+    path = Path(path)
+    if any(item.get('path') == str(path) for item in manifest.get('desktops', [])):
+        return
+    entry = {'path': str(path), 'target': str(source), 'created': True}
+    if path.exists() or path.is_symlink():
+        entry.update(backup_existing(path))
+        if path.is_dir():
+            fail(f'compatibility desktop path is a directory: {path}')
+        path.unlink()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, path)
+    try:
+        account = pwd.getpwnam(USER)
+        os.chown(path, account.pw_uid, account.pw_gid)
+    except KeyError:
+        fail(f'product user does not exist: {USER}')
+    os.chmod(path, 0o644)
+    manifest['desktops'].append(entry)
+
+
+def update_desktop_database(path, as_user=False):
+    command = ['/usr/bin/update-desktop-database', str(path)]
+    if as_user:
+        command = ['/usr/bin/runuser', '-u', USER, '--'] + command
+    try:
+        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        fail(f'cannot update desktop database for {path}: {exc}')
+
+
+def install_session(runtime_dir, compat=False, desktops=False):
+    preflight()
+    runtime_dir = Path(runtime_dir)
+    if not runtime_dir.is_dir():
+        fail(f'runtime directory missing: {runtime_dir}')
+    manifest = load_manifest()
+    service_root = runtime_dir / 'dbus-1' / 'services'
+    service_root.mkdir(parents=True, exist_ok=True)
+    os.chmod(service_root, 0o755)
+    for name in GTK4_SERVICES:
+        target = SERVICE_DIR / name
+        install_link(service_root / name, target, manifest, 'runtime_services')
+    if compat:
+        for name in (*GTK4_BIN_NAMES, EOG_BIN):
+            install_compat_link(COMPAT_DIR / name, BIN_DIR / name, manifest)
+    if desktops:
+        for source in sorted(APPLICATION_DIR.glob('*.desktop')):
+            install_compat_desktop(COMPAT_DESKTOP_DIR / source.name, source, manifest)
+    update_desktop_database(APPLICATION_DIR)
+    if desktops:
+        update_desktop_database(COMPAT_DESKTOP_DIR, as_user=True)
+    save_manifest(manifest)
+    print(f'santos-gtk-client-routes: install-session PASS runtime={runtime_dir} compat={compat} desktops={desktops}')
+
+
+def remove_session():
+    manifest = load_manifest()
+    errors = []
+    for entry in reversed(manifest.get('runtime_services', [])):
+        path = Path(entry['path'])
+        target = entry.get('target')
+        try:
+            if path.is_symlink() and target and os.path.realpath(path) == os.path.realpath(target):
+                path.unlink()
+            elif not path.exists() and not path.is_symlink():
+                continue
+            else:
+                errors.append(f'not the expected runtime route link: {path}')
+        except OSError as exc:
+            errors.append(f'{path}: {exc}')
+    for entry in reversed(manifest.get('compat', [])):
+        path = Path(entry['path'])
+        backup = entry.get('backup')
+        try:
+            if path.is_symlink() and entry.get('target') and os.path.realpath(path) == os.path.realpath(entry['target']):
+                path.unlink()
+            elif path.exists() or path.is_symlink():
+                errors.append(f'not the expected compatibility route link: {path}')
+            if entry.get('existed') and backup:
+                source = Path(backup)
+                if not source.exists() and not source.is_symlink():
+                    errors.append(f'compatibility backup missing: {source}')
+                else:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    if source.is_symlink():
+                        os.symlink(os.readlink(source), path)
+                    else:
+                        shutil.copy2(source, path)
+                        os.chmod(path, entry.get('mode', 0o755))
+                        try:
+                            os.chown(path, entry.get('uid', 0), entry.get('gid', 0))
+                        except PermissionError:
+                            pass
+            elif not entry.get('existed') and (path.exists() or path.is_symlink()):
+                errors.append(f'new compatibility path was not removed: {path}')
+        except OSError as exc:
+            errors.append(f'{path}: {exc}')
+    for entry in reversed(manifest.get('desktops', [])):
+        path = Path(entry['path'])
+        backup = entry.get('backup')
+        try:
+            if path.exists() or path.is_symlink():
+                path.unlink()
+            if entry.get('existed') and backup:
+                source = Path(backup)
+                if not source.exists():
+                    errors.append(f'compatibility desktop backup missing: {source}')
+                else:
+                    shutil.copy2(source, path)
+                    os.chmod(path, entry.get('mode', 0o644))
+                    try:
+                        os.chown(path, entry.get('uid', 0), entry.get('gid', 0))
+                    except PermissionError:
+                        pass
+            elif not entry.get('existed') and (path.exists() or path.is_symlink()):
+                errors.append(f'new compatibility desktop was not removed: {path}')
+        except OSError as exc:
+            errors.append(f'{path}: {exc}')
+    if errors:
+        fail('; '.join(errors))
+    if APPLICATION_DIR.is_dir():
+        update_desktop_database(APPLICATION_DIR)
+    if manifest.get('desktops') and COMPAT_DESKTOP_DIR.is_dir():
+        update_desktop_database(COMPAT_DESKTOP_DIR, as_user=True)
+    save_manifest({'version': 2, 'runtime_services': [], 'compat': [], 'desktops': []})
+    print('santos-gtk-client-routes: remove-session PASS')
+
+
+def inspect():
+    preflight()
+    manifest = load_manifest()
+    result = {
+        'profile': str(PROFILE),
+        'resolver': str(RUNTIME),
+        'package_templates': str(PACKAGE),
+        'runtime_services': [
+            {'path': item['path'], 'target': item['target']}
+            for item in manifest.get('runtime_services', [])
+        ],
+        'compat': [
+            {'path': item['path'], 'target': item.get('target')}
+            for item in manifest.get('compat', [])
+        ],
+        'desktops': [
+            {'path': item['path'], 'target': item.get('target')}
+            for item in manifest.get('desktops', [])
+        ],
+    }
+    print(json.dumps(result, sort_keys=True))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action', choices=('preflight', 'install-session', 'remove-session', 'inspect'))
+    parser.add_argument('--runtime-dir', default=os.environ.get('XDG_RUNTIME_DIR', ''))
+    parser.add_argument('--compat-local', action='store_true')
+    parser.add_argument('--compat-desktop', action='store_true')
+    args = parser.parse_args()
+    try:
+        if args.action == 'preflight':
+            preflight()
+            print('santos-gtk-client-routes: preflight PASS')
+        elif args.action == 'inspect':
+            inspect()
+        elif args.action == 'install-session':
+            if not args.runtime_dir:
+                fail('install-session requires --runtime-dir or XDG_RUNTIME_DIR')
+            install_session(args.runtime_dir, compat=args.compat_local,
+                            desktops=args.compat_desktop)
+        else:
+            remove_session()
+    except RouteError as exc:
+        print(f'santos-gtk-client-routes: ERROR: {exc}', file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

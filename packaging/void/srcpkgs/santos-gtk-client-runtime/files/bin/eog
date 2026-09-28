@@ -1,0 +1,11 @@
+#!/bin/sh
+# EOG is GTK3. Keep it outside the GTK4/Santos profile when a GTK4 parent
+# launches a handler: remove the inherited private graphics environment before
+# exec'ing the real GTK3 binary.
+for name in GDK_BACKEND GSK_RENDERER GDK_DISABLE LD_LIBRARY_PATH LD_PRELOAD \
+    LIBEGL LIBGLESV2 HYBRIS_ANDROID_SDK_VERSION HYBRIS_LINKER_DIR \
+    HYBRIS_EGLPLATFORM HYBRIS_EGLPLATFORM_DIR EGL_PLATFORM SANTOS_EGL_PLATFORM \
+    ANDROID_ROOT ANDROID_DATA LD_SHIM_LIBS; do
+    unset "$name"
+done
+exec /usr/bin/eog "$@"

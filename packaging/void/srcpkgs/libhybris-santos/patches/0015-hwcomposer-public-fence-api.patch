@@ -1,0 +1,44 @@
+--- a/hybris/egl/platforms/hwcomposer/hwcomposer_window.h
++++ b/hybris/egl/platforms/hwcomposer/hwcomposer_window.h
+@@ -34,6 +34,17 @@
+                                  unsigned int usage) ;
+    virtual ~HWComposerNativeWindowBuffer() ;
+ 
++public:
++    /*
++     * Type-correct accessors for the exported C API. HWCNativeBufferGetFence()
++     * and HWCNativeBufferSetFence() receive the ANativeWindowBuffer base
++     * subobject of an actual HWComposerNativeWindowBuffer; these ordinary
++     * non-virtual accessors let them reach the real fence field without
++     * downcasting to an invented, more-derived type.
++     */
++    int getFenceFd() const { return fenceFd; }
++    void setFenceFd(int fd) { fenceFd = fd; }
++
+ protected:
+     int busy;
+     int fenceFd;
+--- a/hybris/egl/platforms/hwcomposer/hwcomposer_window.cpp
++++ b/hybris/egl/platforms/hwcomposer/hwcomposer_window.cpp
+@@ -76,19 +76,14 @@
+     delete window;
+ }
+ 
+-struct _BufferFenceAccessor : public HWComposerNativeWindowBuffer {
+-    int get() { return fenceFd; }
+-    void set(int fd) { fenceFd = fd; };
+-};
+-
+ extern "C" int HWCNativeBufferGetFence(struct ANativeWindowBuffer *buf)
+ {
+-    return static_cast<_BufferFenceAccessor *>(buf)->get();
++    return static_cast<HWComposerNativeWindowBuffer *>(buf)->getFenceFd();
+ }
+ 
+ extern "C" void HWCNativeBufferSetFence(struct ANativeWindowBuffer *buf, int fd)
+ {
+-    static_cast<_BufferFenceAccessor *>(buf)->set(fd);
++    static_cast<HWComposerNativeWindowBuffer *>(buf)->setFenceFd(fd);
+ }
+ 
+ static pthread_cond_t _cond = PTHREAD_COND_INITIALIZER;

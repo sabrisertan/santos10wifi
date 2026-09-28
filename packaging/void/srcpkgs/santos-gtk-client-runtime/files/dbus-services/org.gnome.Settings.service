@@ -1,0 +1,3 @@
+[D-BUS Service]
+Name=org.gnome.Settings
+Exec=/usr/libexec/santos-client-environment --profile /etc/santos/gtk4-client.ini --exec /usr/bin/gnome-control-center

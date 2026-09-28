@@ -1,0 +1,40 @@
+# Template file for 'libhybris-santos'
+pkgname=libhybris-santos
+version=20260908
+revision=4
+build_wrksrc="hybris"
+build_style=gnu-configure
+configure_args="--libdir=/usr/lib/santos-hybris --bindir=/usr/libexec/santos-hybris
+ --includedir=/usr/include/santos-hybris --enable-trace --enable-debug
+ --enable-experimental --enable-property-cache --enable-arch=x86
+ --enable-wayland
+ --with-default-egl-platform=null
+ --with-android-headers=/usr/include/android-7.1
+ --with-default-hybris-ld-library-path=/vendor/lib:/system/lib"
+hostmakedepends="automake libtool pkg-config android-headers-7.1-santos wayland-devel"
+makedepends="glibc-devel linux-headers wayland-devel"
+# Modern GCC treats old libhybris idioms as errors; downgrade to warnings
+# (upstream code issue, revisit after bring-up).
+CFLAGS="-Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=return-mismatch"
+# pmOS parity: Android linker headers use legacy off64_t naming.
+CPPFLAGS="$CPPFLAGS -D_LARGEFILE64_SOURCE"
+short_desc="libhybris for santos10wifi (glibc, HWC-only, PowerVR)"
+maintainer="Orphaned <orphan@voidlinux.org>"
+license="Apache-2.0"
+homepage="https://github.com/Halium/libhybris"
+distfiles="https://github.com/Halium/libhybris/archive/eaa6884ba95a1d5d0303119ffdc48952a098059b.tar.gz"
+checksum=8b3534bb979063a7fda4b14218013bf375ffbdf499f478743a8265a4b6c3d10b
+
+pre_configure() {
+	NOCONFIGURE=1 ./autogen.sh
+}
+
+post_patch() {
+	# pmOS R14 prepare steps: drop tests subdir (test_camera needs Wayland),
+	# gcc dladdr return-type rewrite.
+	sed -i 's/^SUBDIRS += utils tests$/SUBDIRS += utils/' Makefile.am
+	grep -q '^SUBDIRS += utils$' Makefile.am || { echo "DISABLE_TESTS_FAILED"; return 1; }
+	sed -i '/^static void\* _hybris_hook_dladdr/,/^}/ s@return _android_dladdr(addr, info);@return (void *)(uintptr_t)_android_dladdr(addr, info);@' common/hooks.c
+	grep -q 'return (void \*)(uintptr_t)_android_dladdr(addr, info);' common/hooks.c || { echo "DLADDR_REWRITE_FAILED"; return 1; }
+	echo "SANTOS_PREPARE_PASS"
+}

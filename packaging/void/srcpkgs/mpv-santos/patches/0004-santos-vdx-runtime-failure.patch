@@ -1,0 +1,59 @@
+--- a/filters/f_decoder_wrapper.h
++++ b/filters/f_decoder_wrapper.h
+@@ -88,6 +88,14 @@
+ 
+ bool mp_decoder_wrapper_reinit(struct mp_decoder_wrapper *d);
+ 
++// Whether the underlying decoder filter has failed. A failed decoder filter
++// may still end its output with a normal EOF; callers must treat such an EOF
++// as a playback error rather than as a normal end of the stream.
++// This consumes the pending failure notification, so it must only be called
++// when the caller immediately transitions to a terminal error path. Must not
++// be called from the decoder thread.
++bool mp_decoder_wrapper_has_failed(struct mp_decoder_wrapper *d);
++
+ struct mp_decoder {
+     // Bidirectional filter; takes MP_FRAME_PACKET for input.
+     struct mp_filter *f;
+--- a/filters/f_decoder_wrapper.c
++++ b/filters/f_decoder_wrapper.c
+@@ -500,6 +500,15 @@
+     return res;
+ }
+ 
++bool mp_decoder_wrapper_has_failed(struct mp_decoder_wrapper *d)
++{
++    struct priv *p = d->f->priv;
++    thread_lock(p);
++    bool failed = p->decoder && mp_filter_has_failed(p->decoder->f);
++    thread_unlock(p);
++    return failed;
++}
++
+ void mp_decoder_wrapper_set_frame_drops(struct mp_decoder_wrapper *d, int num)
+ {
+     struct priv *p = d->f->priv;
+--- a/player/video.c
++++ b/player/video.c
+@@ -499,6 +499,21 @@
+         if (frame.type == MP_FRAME_NONE) {
+             r = vo_c->filter->got_output_eof ? VD_EOF : VD_WAIT;
+         } else if (frame.type == MP_FRAME_EOF) {
++            // A decoder filter can signal a fatal runtime failure by marking
++            // itself failed and then ending its output with EOF (the custom
++            // santos_vdx decoder does this). Do not accept that as a normal
++            // end of the video stream; otherwise playback silently continues
++            // with audio only and exits successfully.
++            if (vo_c->track && vo_c->track->dec &&
++                mp_decoder_wrapper_has_failed(vo_c->track->dec))
++            {
++                MP_FATAL(mpctx, "Video decoder failed during playback.\n");
++                if (mpctx->error_playing >= 0)
++                    mpctx->error_playing = MPV_ERROR_GENERIC;
++                if (!mpctx->stop_play)
++                    mpctx->stop_play = PT_ERROR;
++                return VD_ERROR;
++            }
+             r = VD_EOF;
+         } else if (frame.type == MP_FRAME_VIDEO) {
+             img = frame.data;

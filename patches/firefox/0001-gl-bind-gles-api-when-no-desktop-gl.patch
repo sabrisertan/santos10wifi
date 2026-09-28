@@ -1,0 +1,26 @@
+Make the legacy (non-WebRender) EGL path bind the GLES client API on
+drivers that expose no desktop-OpenGL API.
+
+GLContextEGLFactory::Create() already retries with aUseGles=true when the
+desktop-GL attempt fails, but CreateImpl() set REQUIRE_COMPAT_PROFILE purely
+on !aWebRender, so the GLES retry also received that flag. CreateGLContext()
+turns REQUIRE_COMPAT_PROFILE into EGL_CONTEXT_OPENGL_PROFILE_MASK and
+EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT, which are desktop-GL-only and
+are rejected with EGL_BAD_ATTRIBUTE when a GLES context is requested, so the
+existing fallback could never succeed.
+
+Gate the flag on !aUseGles so the compatibility profile is requested only for
+the desktop-GL attempt. Nothing else changes: the GLES path already requests
+EGL_OPENGL_ES2_BIT in CreateConfig() and EGL_CONTEXT_MAJOR_VERSION 2 here.
+
+--- a/gfx/gl/GLContextProviderEGL.cpp
++++ b/gfx/gl/GLContextProviderEGL.cpp
+@@ -289,7 +289,7 @@ already_AddRefed<GLContextEGL> GLContextEGLFactory::CreateImpl(
+   if (aWebRender && aUseGles) {
+     flags |= CreateContextFlags::PREFER_ES3;
+   }
+-  if (!aWebRender) {
++  if (!aWebRender && !aUseGles) {
+     flags |= CreateContextFlags::REQUIRE_COMPAT_PROFILE;
+   }
+

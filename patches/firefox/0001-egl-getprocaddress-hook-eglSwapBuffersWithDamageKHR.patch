@@ -1,0 +1,113 @@
+Subject: [PATCH] hybris/egl/egl.c: hook eglSwapBuffersWithDamageKHR into the swap wrapper
+
+Ported from upstream libhybris PR #565
+(https://github.com/libhybris/libhybris/pull/565, commit 5715522,
+"hybris: hook eglSwapBuffersWithDamageKHR, add NATIVE_OPERATION_SET_SURFACE_DAMAGE"),
+reduced to the minimal interception semantics that our deployed revision needs.
+
+Why the reduction is necessary
+------------------------------
+PR #565 is written against upstream master, which uses an override table:
+
+    static struct FuncNamePair _eglHybrisOverrideFunctions[] = {
+        OVERRIDE_MY(eglSwapBuffersWithDamageEXT),
+        OVERRIDE_TO(eglSwapBuffersWithDamageKHR, _my_eglSwapBuffersWithDamageEXT),
+        ...
+    };
+
+Our deployed revision is Halium/libhybris eaa6884ba95a1d5d0303119ffdc48952a098059b
+(libhybris R14, pkgver 1.0_git20191001 pkgrel 14). It has no such table and no
+FuncNamePair / OVERRIDE_* machinery at all; its interception is the if/else
+chain inside eglGetProcAddress(). So the PR's table change has no counterpart
+here and is not imported. The interception is expressed in R14's own idiom.
+
+What is deliberately NOT imported
+---------------------------------
+1. The PR's new file-scope statics
+
+       static EGLBoolean (*_eglSwapBuffersWithDamageKHR)(...);
+       static EGLBoolean (*_eglSwapBuffersWithDamageEXT)(...);
+
+   exist only to let the wrapper *prefer the vendor's damage entry point*.
+
+2. The PR's rewritten swap body, which resolves the vendor damage symbols and
+   then calls, in order, vendor KHR -> vendor EXT -> plain vendor eglSwapBuffers.
+
+Neither is required for correctness here, and (2) would change behaviour on the
+paths we are required to preserve:
+
+  * The deployed Wayland platform module does not consume the forwarded damage.
+    WaylandNativeWindow::finishSwap() issues its own full-surface
+    wl_surface_damage(surface, 0, 0, wnb->width, wnb->height) and then clears
+    m_damage_rects / m_damage_n_rects, so which vendor damage entry point is
+    called does not affect whether a buffer is committed or released.
+  * Adopting (2) would also alter the existing eglSwapBuffersWithDamageEXT and
+    plain eglSwapBuffers paths, which must be preserved.
+
+The PR's own wayland_window.cpp damage-rect work (NATIVE_WINDOW_SET_SURFACE_DAMAGE,
+setSurfaceDamage, the malloc/memcpy of rects, the commented-out FIXME block) is
+not imported either: it is damage forwarding, unrelated to the commit path, and
+it would require touching the deployed L29 Wayland platform module and
+eglplatformcommon, both of which must stay unchanged.
+
+What the existing wrapper already does, unchanged
+-------------------------------------------------
+Once BOTH names enter it, the R14 wrapper already satisfies the required
+semantics verbatim:
+
+    if (egl_helper_has_mapping(surface)) {
+        win = egl_helper_get_mapping(surface);
+        ws_prepareSwap(dpy, win, rects, n_rects);
+        ret = (*_eglSwapBuffers)(dpy, surface);
+        ws_finishSwap(dpy, win);
+    } else {
+        ret = (*_eglSwapBuffers)(dpy, surface);
+    }
+
+i.e. mapped window surfaces execute ws_prepareSwap -> vendor swap -> ws_finishSwap,
+and unmapped surfaces keep calling the vendor swap alone.
+
+The defect this fixes
+---------------------
+Gecko resolves one function slot for the damage swap:
+
+    gfx/gl/GLLibraryEGL.cpp:711  fSwapBuffersWithDamage = eglSwapBuffersWithDamageEXT
+    gfx/gl/GLLibraryEGL.cpp:724  fSwapBuffersWithDamage = eglSwapBuffersWithDamageKHR
+                                 (second branch overwrites the same slot)
+    gfx/gl/GLContextProviderEGL.cpp:632  mEgl->fSwapBuffersWithDamage(...)
+
+This device reports both EGL_EXT_swap_buffers_with_damage and
+EGL_KHR_swap_buffers_with_damage, so the slot holds the KHR name. With no KHR
+arm in eglGetProcAddress, resolution fell through to the vendor, so the client
+called PVR's eglSwapBuffersWithDamageKHR directly and never re-entered hybris.
+ws_prepareSwap/ws_finishSwap and therefore WaylandNativeWindow::finishSwap() were
+never called, no buffer was ever attached or committed, no wl_buffer.release could
+ever arrive, m_freeBufs could only decrease, and the 4th dequeueBuffer blocked
+forever in readQueue(true) / wl_display_dispatch_queue.
+
+This is the only behavioural change in the patch: one added arm.
+
+Upstream reference
+------------------
+PR:      https://github.com/libhybris/libhybris/pull/565
+Commit:  5715522  "hybris: hook eglSwapBuffersWithDamageKHR, add
+                   NATIVE_OPERATION_SET_SURFACE_DAMAGE."
+PR claim: "This removes the need for the SailfishOS Gecko workaround
+           0047-sailfishos-egl-Drop-swap_buffers_with_damage-extensi.patch",
+          which is the same defect: a Gecko-side workaround existed only because
+          hybris did not hook the KHR alias. Per instruction, this fix is made on
+          the hybris side and Gecko is not patched for this defect.
+
+--- a/egl.c
++++ b/egl.c
+@@ -409,6 +409,10 @@ __eglMustCastToProperFunctionPointerType eglGetProcAddress(const char *procn
+ 	{
+ 		return (__eglMustCastToProperFunctionPointerType) _my_eglSwapBuffersWithDamageEXT;
+ 	}
++	else if (strcmp(procname, "eglSwapBuffersWithDamageKHR") == 0)
++	{
++		return (__eglMustCastToProperFunctionPointerType) _my_eglSwapBuffersWithDamageEXT;
++	}
+ 	else if (strcmp(procname, "glEGLImageTargetTexture2DOES") == 0)
+ 	{
+ 		return (__eglMustCastToProperFunctionPointerType) _my_glEGLImageTargetTexture2DOES;

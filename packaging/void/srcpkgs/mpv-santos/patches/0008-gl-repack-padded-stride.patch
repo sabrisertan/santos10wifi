@@ -1,0 +1,149 @@
+--- a/video/out/opengl/ra_gl.c
++++ b/video/out/opengl/ra_gl.c
+@@ -1,4 +1,6 @@
+ #include <libavutil/intreadwrite.h>
++#include <stdint.h>
++#include <string.h>
+ 
+ #include "formats.h"
+ #include "utils.h"
+@@ -11,6 +13,14 @@
+     GL *gl;
+     bool debug_enable;
+     bool timer_active; // hack for GL_TIME_ELAPSED limitations
++
++    // GLES2 has no GL_UNPACK_ROW_LENGTH. Keep one reusable CPU scratch
++    // buffer for padded software image uploads so a non-tight stride does
++    // not degrade into one glTexSubImage2D call per row.
++    uint8_t *upload_scratch;
++    size_t upload_scratch_size;
++    bool repack_logged;
++    bool capability_logged;
+ };
+ 
+ // For ra_tex.priv
+@@ -497,20 +507,82 @@
+     struct ra_buf *buf = params->buf;
+     struct ra_tex_gl *tex_gl = tex->priv;
+     struct ra_buf_gl *buf_gl = buf ? buf->priv : NULL;
++    struct ra_gl *gl_priv = ra->priv;
++    struct ra_tex_upload_params upload = *params;
+     mp_assert(tex->params.host_mutable);
+     mp_assert(!params->buf || !params->src);
+ 
+-    if (ra->use_pbo && !params->buf)
+-        return ra_tex_upload_pbo(ra, &tex_gl->pbo, params);
++    // GLES2 does not expose GL_UNPACK_ROW_LENGTH.  mp_image deliberately
++    // aligns software image strides to 64 bytes; for a 480/854-wide NV12
++    // plane the generic uploader would otherwise issue one GL call per row.
++    // Repack once into reusable scratch memory and keep the upload a single
++    // tightly-packed transfer.  This is a renderer-side fix; the decoder's
++    // allocation, image planes and vendor pitch are left untouched.
++    GLint internal_format;
++    GLenum format, type;
++    ra_gl_get_format(tex->params.format, &internal_format, &format, &type);
++    (void)internal_format;
++    int bpp = gl_bytes_per_pixel(format, type);
++    // A software video plane supplies rc with its logical extent because
++    // gpu-tex-pad-* can make the destination texture larger.
++    int upload_w = upload.rc ? upload.rc->x1 - upload.rc->x0
++                              : tex->params.w;
++    int upload_h = upload.rc ? upload.rc->y1 - upload.rc->y0
++                              : tex->params.h;
++    if (!gl_priv->capability_logged) {
++        gl_priv->capability_logged = true;
++        mp_msg(ra->log, MSGL_INFO,
++               "GPU upload capabilities row_length=%d pbo=%d direct_upload=%d format=%s size=%dx%d stride=%d\n",
++               !!(gl->mpgl_caps & MPGL_CAP_ROW_LENGTH), ra->use_pbo,
++               !!(ra->caps & RA_CAP_DIRECT_UPLOAD),
++               tex->params.format->name, upload_w, upload_h, upload.stride);
++    }
++    if (!buf && upload.src && !(gl->mpgl_caps & MPGL_CAP_ROW_LENGTH) &&
++        bpp > 0 && upload_w > 0 && upload_h > 0 && upload.stride > 0 &&
++        upload.stride != bpp * upload_w)
++    {
++        int source_stride = upload.stride;
++        size_t row_bytes = (size_t)bpp * (size_t)upload_w;
++        if (row_bytes > SIZE_MAX / (size_t)upload_h)
++            return false;
++        size_t needed = row_bytes * (size_t)upload_h;
++        if (needed > gl_priv->upload_scratch_size) {
++            gl_priv->upload_scratch = talloc_realloc(gl_priv,
++                                                     gl_priv->upload_scratch,
++                                                     uint8_t, needed);
++            gl_priv->upload_scratch_size = needed;
++        }
++        for (int y = 0; y < upload_h; y++) {
++            memcpy(gl_priv->upload_scratch + (size_t)y * row_bytes,
++                   (const uint8_t *)upload.src + (size_t)y * upload.stride,
++                   row_bytes);
++        }
++        upload.src = gl_priv->upload_scratch;
++        upload.stride = row_bytes;
++        if (!gl_priv->repack_logged) {
++            gl_priv->repack_logged = true;
++            mp_msg(ra->log, MSGL_INFO,
++                   "GPU upload repack enabled format=%s source_stride=%d packed_stride=%zu size=%dx%d\n",
++                   tex->params.format->name, source_stride, row_bytes,
++                   upload_w, upload_h);
++        }
++    }
++
++    // Keep the PBO path for repacked data as well.  The PBO helper performs
++    // the scratch-to-buffer copy synchronously, so the subsequent GL upload
++    // still sees one tightly packed transfer without changing the reported
++    // upload mode.
++    if (ra->use_pbo && !upload.buf)
++        return ra_tex_upload_pbo(ra, &tex_gl->pbo, &upload);
+ 
+-    const void *src = params->src;
++    const void *src = upload.src;
+     if (buf) {
+         gl->BindBuffer(GL_PIXEL_UNPACK_BUFFER, buf_gl->buffer);
+-        src = (void *)params->buf_offset;
++        src = (void *)upload.buf_offset;
+     }
+ 
+     gl->BindTexture(tex_gl->target, tex_gl->texture);
+-    if (params->invalidate && gl->InvalidateTexImage)
++    if (upload.invalidate && gl->InvalidateTexImage)
+         gl->InvalidateTexImage(tex_gl->texture, 0);
+ 
+     switch (tex->params.dimensions) {
+@@ -520,10 +592,10 @@
+         break;
+     case 2: {
+         struct mp_rect rc = {0, 0, tex->params.w, tex->params.h};
+-        if (params->rc)
+-            rc = *params->rc;
++        if (upload.rc)
++            rc = *upload.rc;
+         gl_upload_tex(gl, tex_gl->target, tex_gl->format, tex_gl->type,
+-                      src, params->stride, rc.x0, rc.y0, rc.x1 - rc.x0,
++                      src, upload.stride, rc.x0, rc.y0, rc.x1 - rc.x0,
+                       rc.y1 - rc.y0);
+         break;
+     }
+--- a/video/out/gpu/video.c
++++ b/video/out/gpu/video.c
+@@ -3780,10 +3780,20 @@
+             goto error;
+         }
+ 
++        // gpu-tex-pad-* may make the texture larger than the decoded plane.
++        // Upload only the logical plane extent; padded source rows do not
++        // exist in an mp_image allocation.
++        struct mp_rect upload_rect = {
++            0,
++            0,
++            mp_image_plane_w(mpi, n),
++            mp_image_plane_h(mpi, n),
++        };
+         struct ra_tex_upload_params params = {
+             .tex = plane->tex,
+             .src = mpi->planes[n],
+             .invalidate = true,
++            .rc = &upload_rect,
+             .stride = mpi->stride[n],
+         };
+ 

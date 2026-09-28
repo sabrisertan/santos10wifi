@@ -1,0 +1,165 @@
+--- a/video/out/opengl/ra_gl.c
++++ b/video/out/opengl/ra_gl.c
+@@ -1,3 +1,5 @@
++#include <stdio.h>
++#include <time.h>
+ #include <libavutil/intreadwrite.h>
+ #include <stdint.h>
+ #include <string.h>
+@@ -19,6 +21,7 @@
+     // not degrade into one glTexSubImage2D call per row.
+     uint8_t *upload_scratch;
+     size_t upload_scratch_size;
++    int64_t diag_memcpy_ns;   // bounded diagnostic: last repack memcpy time
+     bool repack_logged;
+     bool capability_logged;
+ };
+@@ -529,6 +532,51 @@
+                               : tex->params.w;
+     int upload_h = upload.rc ? upload.rc->y1 - upload.rc->y0
+                               : tex->params.h;
++
++    // Bounded, stderr-only upload-branch proof. Reports the pointer path, the
++    // logical rect, source stride, bpp, destination texture size, real GL/ES
++    // version and unpacking extension, MPGL_CAP_ROW_LENGTH, every term of the
++    // padded-stride predicate, whether the repack executes, the packed stride
++    // handed downstream, bytes copied, and separate memcpy/upload timings.
++    static int diag_tex_uploads;
++    const int diag_limit = 6;
++    int diag = diag_tex_uploads < diag_limit;
++    if (diag)
++        diag_tex_uploads++;
++    if (diag) {
++        const char *unpack_subimage = "absent";
++        if (gl->extensions && strstr(gl->extensions, "GL_EXT_unpack_subimage"))
++            unpack_subimage = "present";
++        int p_no_buf        = !buf;
++        int p_has_src       = !!upload.src;
++        int p_no_row_len    = !(gl->mpgl_caps & MPGL_CAP_ROW_LENGTH);
++        int p_bpp_ok        = bpp > 0;
++        int p_wh_ok         = upload_w > 0 && upload_h > 0;
++        int p_stride_ok     = upload.stride > 0;
++        int p_padded        = upload.stride != bpp * upload_w;
++        int predicate_fires = p_no_buf && p_has_src && p_no_row_len &&
++                              p_bpp_ok && p_wh_ok && p_stride_ok && p_padded;
++        fprintf(stderr,
++                "SANTOSUPLOADRA#%d tex=%d path=%s buf=%d src=%d "
++                "use_pbo=%d internal_format=0x%x format=0x%x type=0x%x bpp=%d "
++                "rect_w=%d rect_h=%d rect_x0=%d rect_y0=%d "
++                "tex_w=%d tex_h=%d src_stride=%d tight_stride=%d padded=%d "
++                "gl_version=%d gl_es=%d glsl=%d row_length_cap=%d "
++                "unpack_subimage=%s pred[no_buf=%d has_src=%d no_row_len=%d "
++                "bpp_ok=%d wh_ok=%d stride_ok=%d padded=%d]=%d -> repack=%d\n",
++                diag_tex_uploads, diag, buf ? "buffer" : "src-pointer",
++                !!buf, !!upload.src, ra->use_pbo, (unsigned)internal_format,
++                (unsigned)format, (unsigned)type, bpp, upload_w, upload_h,
++                upload.rc ? upload.rc->x0 : 0, upload.rc ? upload.rc->y0 : 0,
++                tex->params.w, tex->params.h, upload.stride, bpp * upload_w,
++                upload.stride != bpp * upload_w, gl->version, gl->es,
++                gl->glsl_version, !!(gl->mpgl_caps & MPGL_CAP_ROW_LENGTH),
++                unpack_subimage, p_no_buf, p_has_src, p_no_row_len, p_bpp_ok,
++                p_wh_ok, p_stride_ok, p_padded, predicate_fires,
++                predicate_fires);
++        fflush(stderr);
++    }
++
+     if (!gl_priv->capability_logged) {
+         gl_priv->capability_logged = true;
+         mp_msg(ra->log, MSGL_INFO,
+@@ -552,13 +600,24 @@
+                                                      uint8_t, needed);
+             gl_priv->upload_scratch_size = needed;
+         }
++        int64_t t_rep = mp_time_ns();
+         for (int y = 0; y < upload_h; y++) {
+             memcpy(gl_priv->upload_scratch + (size_t)y * row_bytes,
+                    (const uint8_t *)upload.src + (size_t)y * upload.stride,
+                    row_bytes);
+         }
++        gl_priv->diag_memcpy_ns = mp_time_ns() - t_rep;
+         upload.src = gl_priv->upload_scratch;
+         upload.stride = row_bytes;
++        if (diag) {
++            fprintf(stderr,
++                    "SANTOSUPLOADRA#%d repack_executed=1 source_stride=%d "
++                    "packed_stride=%zu rows=%d bytes_copied=%zu memcpy_ns=%lld\n",
++                    diag_tex_uploads, source_stride, row_bytes, upload_h,
++                    row_bytes * (size_t)upload_h,
++                    (long long)gl_priv->diag_memcpy_ns);
++            fflush(stderr);
++        }
+         if (!gl_priv->repack_logged) {
+             gl_priv->repack_logged = true;
+             mp_msg(ra->log, MSGL_INFO,
+@@ -594,9 +653,21 @@
+         struct mp_rect rc = {0, 0, tex->params.w, tex->params.h};
+         if (upload.rc)
+             rc = *upload.rc;
++        int64_t t0 = diag ? mp_time_ns() : 0;
+         gl_upload_tex(gl, tex_gl->target, tex_gl->format, tex_gl->type,
+                       src, upload.stride, rc.x0, rc.y0, rc.x1 - rc.x0,
+                       rc.y1 - rc.y0);
++        if (diag) {
++            fprintf(stderr,
++                    "SANTOSUPLOADRA#%d upload_done handed_stride=%d "
++                    "handed_src=%s memcpy_ns=%lld upload_ns=%lld\n",
++                    diag_tex_uploads, upload.stride,
++                    upload.src == gl_priv->upload_scratch ? "repack-scratch"
++                                                          : "original",
++                    (long long)gl_priv->diag_memcpy_ns,
++                    (long long)(mp_time_ns() - t0));
++            fflush(stderr);
++        }
+         break;
+     }
+     case 3:
+--- a/video/out/opengl/utils.c
++++ b/video/out/opengl/utils.c
+@@ -1,3 +1,4 @@
++#include <stdio.h>
+ /*
+  * This file is part of mpv.
+  * Parts based on MPlayer code by Reimar Döffinger.
+@@ -94,12 +95,41 @@
+         if (stride != bpp * w)
+             slice = 1; // very inefficient, but at least it works
+     }
++    // Bounded, stderr-only upload-branch proof. stderr is used deliberately:
++    // it cannot be silenced by mpv's per-module log levels or by an
++    // embedder that filters MPV_LOG_LEVEL_INFO events. Only the first few
++    // calls are reported so this cannot flood a long run.
++    static int diag_calls;
++    const int diag_limit = 8;
++    int diag = diag_calls < diag_limit;
++    if (diag)
++        diag_calls++;
++    int texsub_calls = 0;
+     for (; y + slice <= y_max; y += slice) {
+         gl->TexSubImage2D(target, 0, x, y, w, slice, format, type, (void *)data);
+         data += stride * slice;
++        texsub_calls++;
+     }
+-    if (y < y_max)
++    if (y < y_max) {
+         gl->TexSubImage2D(target, 0, x, y, w, y_max - y, format, type, (void *)data);
++        texsub_calls++;
++    }
++    if (diag) {
++        const char *unpack_subimage = "absent";
++        if (gl->extensions && strstr(gl->extensions, "GL_EXT_unpack_subimage"))
++            unpack_subimage = "present";
++        fprintf(stderr,
++                "SANTOSUPLOAD#%d call=%d target=0x%x format=0x%x type=0x%x "
++                "bpp=%d stride=%d tight_stride=%d rect_w=%d rect_h=%d "
++                "gl_version=%d gl_es=%d glsl=%d row_length_cap=%d "
++                "unpack_subimage=%s slice=%d texsubimage2d_calls=%d\n",
++                diag_calls, diag, (unsigned)target, (unsigned)format,
++                (unsigned)type, bpp, stride, bpp * w, w, h, gl->version,
++                gl->es, gl->glsl_version,
++                !!(gl->mpgl_caps & MPGL_CAP_ROW_LENGTH), unpack_subimage,
++                slice, texsub_calls);
++        fflush(stderr);
++    }
+     if (gl->mpgl_caps & MPGL_CAP_ROW_LENGTH)
+         gl->PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+     gl->PixelStorei(GL_UNPACK_ALIGNMENT, 4);

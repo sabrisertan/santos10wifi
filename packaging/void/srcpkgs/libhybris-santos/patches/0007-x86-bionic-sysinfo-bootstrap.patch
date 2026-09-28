@@ -1,0 +1,118 @@
+--- a/hybris/common/hooks.c
++++ b/hybris/common/hooks.c
+@@ -2906,6 +2906,110 @@ static int get_android_sdk_version()
+ #define HOOKS_SIZE(hooks) \
+     (sizeof(hooks) / sizeof(hooks[0]))
+ 
++#if defined(__i386__)
++/*
++ * samsung-santos10wifi / Android 25 i386 compatibility:
++ *
++ * The exact Lineage libc.so used by this device has:
++ *
++ *   __kernel_syscall  @ 0x0003a6d0
++ *   __libc_sysinfo    @ 0x000f400c
++ *
++ * Bionic normally initializes __libc_sysinfo from AT_SYSINFO during
++ * Android process startup.  A native musl process loading Bionic via
++ * libhybris does not run that startup path, leaving the pointer NULL.
++ *
++ * Every affected Bionic syscall stub then does an indirect call through
++ * that NULL pointer.
++ *
++ * Bootstrap the hidden Bionic global from the native process' AT_SYSINFO.
++ */
++#define SANTOS_BIONIC_LIBC_SYSINFO_OFFSET 0x000f400cUL
++#define SANTOS_BIONIC_KERNEL_SYSCALL_OFFSET 0x0003a6d0UL
++
++static int santos_bionic_sysinfo_ready = 0;
++
++static void santos_bionic_sysinfo_bootstrap(void)
++{
++    static const unsigned char kernel_syscall_sig[] = {
++        0x55, 0x89, 0xe5, 0x83, 0xe4, 0xfc,
++        0xe8, 0x00, 0x00, 0x00, 0x00, 0x58
++    };
++
++    unsigned long at_sysinfo;
++    FILE *fp;
++    char line[512];
++
++    if (santos_bionic_sysinfo_ready)
++        return;
++
++    at_sysinfo = getauxval(AT_SYSINFO);
++    if (at_sysinfo == 0)
++        return;
++
++    fp = fopen("/proc/self/maps", "r");
++    if (fp == NULL)
++        return;
++
++    while (fgets(line, sizeof(line), fp) != NULL) {
++        unsigned long start = 0;
++        unsigned long offset = ~0UL;
++        char perms[5] = {0};
++        volatile uintptr_t *slot;
++        void *ks;
++
++        if (sscanf(line,
++                   "%lx-%*lx %4s %lx",
++                   &start,
++                   perms,
++                   &offset) != 3)
++            continue;
++
++        if (offset != 0)
++            continue;
++
++        if (strstr(line, "/system/lib/libc.so") == NULL)
++            continue;
++
++        ks = (void *)(uintptr_t)
++            (start + SANTOS_BIONIC_KERNEL_SYSCALL_OFFSET);
++
++        if (memcmp(ks,
++                   kernel_syscall_sig,
++                   sizeof(kernel_syscall_sig)) != 0) {
++            fprintf(stderr,
++                    "SANTOS_BIONIC_SYSINFO_SIGNATURE_MISMATCH\n");
++            break;
++        }
++
++        slot = (volatile uintptr_t *)(uintptr_t)
++            (start + SANTOS_BIONIC_LIBC_SYSINFO_OFFSET);
++
++        if (*slot == 0)
++            *slot = (uintptr_t)at_sysinfo;
++
++        if (*slot == (uintptr_t)at_sysinfo) {
++            santos_bionic_sysinfo_ready = 1;
++
++            fprintf(stderr,
++                    "SANTOS_BIONIC_SYSINFO_PASS "
++                    "libc_base=%p sysinfo=%p slot=%p\n",
++                    (void *)(uintptr_t)start,
++                    (void *)(uintptr_t)at_sysinfo,
++                    (void *)slot);
++        }
++
++        break;
++    }
++
++    fclose(fp);
++}
++#else
++static void santos_bionic_sysinfo_bootstrap(void)
++{
++}
++#endif
++
+ 
+ static void* __hybris_get_hooked_symbol(const char *sym, const char *requester)
+ {
+@@ -2916,1 +3020,4 @@
+     int sdk_version = -1;
++
++    santos_bionic_sysinfo_bootstrap();
++

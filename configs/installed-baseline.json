@@ -1,0 +1,17 @@
+{
+  "checked": "2026-09-28",
+  "kernel_release": "7.2.0-00698-g92b0083794ca-highmem-p11",
+  "claim": "Read-only identity check; not new hardware acceptance",
+  "loaded_module_build_ids": {
+    "santos_pvr112": "d7c0368d4ff656363d82139bd8c2ac0ebe527ba0",
+    "santos_pvr_shell_vdx": "86ddb84677c6b02f3351280a4493c09c14ae1db8",
+    "santos_sync_core": "e8e25e0e96c8327f5a4b8dd3241f2aa5d6239605",
+    "santos_vdx": "9961db38f8c685a0e47f5ea1860b8e9834539ca6"
+  },
+  "installed_sha256": {
+    "pipeline": "c46e9811deb77bb71fa1a68db31a82f11a4ddfe4f4e3eeec0ea42a030fdb6f01",
+    "private_libmpv": "b813baa56c2142e80cd655504f5f5aa5b90ac46911b07364a58d2ae978598d9c",
+    "private_gtk": "3324177c70b8b76116c7a90e69bd01c483e28d83084ce5a83303f38e5e2e5645",
+    "firefox_launcher": "fb40c6e21c4c56f7f4813f6d4657517fb337b21185ad7a5afb819dcaf1bb7de4"
+  }
+}

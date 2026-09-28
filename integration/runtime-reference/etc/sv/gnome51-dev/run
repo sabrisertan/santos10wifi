@@ -1,0 +1,179 @@
+#!/bin/sh
+# Product single-user GNOME Shell 51 session (L128 v6).
+# Single-generation runit model with deterministic stop/restart:
+# the session runs in a PRIVATE process group (session-inner.sh via
+# setsid); runit's TERM is trapped here and forwarded to that group.
+# No GDM, no login prompt; runit autostart preserves direct-to-desktop
+# boot. Root stays only for the outer setup; Shell + apps run as santos.
+#
+# v6 vs v5: want-down self-poll removed (control/t fixed to TERM the outer PID); v5 vs v4: LAUNCH==PGID wait fix; v4: self-poll; v3: group supervision (see review-delta)
+# TERM, so bare `exec runuser` could never stop), hard /run/user gate,
+# no live-socket unlink. Inner session body moved to session-inner.sh.
+
+set -u
+exec 2>&1
+
+SERVICE_DIR=/etc/sv/gnome51-dev
+SESSION_HELPER=/etc/sv/gnome51-dev/session-inner.sh
+PRODUCT_USER=santos
+PRODUCT_UID=1001
+PRODUCT_HOME=/home/santos
+STATE_DIR=$PRODUCT_HOME/gnome51-session
+SESSION_PGID_FILE=$STATE_DIR/session.pgid
+INSTALL_ROOT=/root/santos/gnome51
+SHELL_BIN=$INSTALL_ROOT/usr/bin/gnome-shell
+SHELL_LIB_DIR=$INSTALL_ROOT/usr/lib/gnome-shell
+DEPS_DIR=$INSTALL_ROOT/usr/lib/gnome-shell-deps
+GJS_PRIVATE_DIR=$INSTALL_ROOT/usr/lib/gjs/girepository-1.0
+MUTTER_LIB_DIR=$INSTALL_ROOT/usr/lib/mutter-51
+R=/usr/lib/santos-hybris
+TLSFIX=/root/libsantos-tlsfix.so
+PULSE_SERVER=unix:/run/user/$PRODUCT_UID/pulse/native
+
+# /run/user is mounted by elogind at boot; our user dir must go on TOP of it,
+# never on the pre-mount underlying dir (shadowed mounts break ownership).
+for _ in $(seq 1 50); do
+    mountpoint -q /run/user && break
+    sleep 0.2
+done
+# Hard gate: never proceed into the shadow-mount case. Fail loudly so
+# runsv retries a clean start instead of running a broken session.
+mountpoint -q /run/user || {
+    echo "launcher_fatal_utc=$(date -u '+%Y-%m-%dT%H:%M:%SZ') reason=/run/user-not-a-mountpoint" >&2
+    exit 1
+}
+mkdir -p "$STATE_DIR/state" /run/user/$PRODUCT_UID
+# If a stale pre-/run/user mount shadows us, drop it and remount cleanly.
+if mountpoint -q /run/user/$PRODUCT_UID; then
+    if [ "$(stat -c %u /run/user/$PRODUCT_UID)" != "$PRODUCT_UID" ]; then
+        umount -l /run/user/$PRODUCT_UID 2>/dev/null || true
+    fi
+fi
+chown $PRODUCT_USER:$PRODUCT_USER "$STATE_DIR" "$STATE_DIR/state" "$PRODUCT_HOME"
+chmod 700 "$STATE_DIR" /run/user/$PRODUCT_UID
+if ! mountpoint -q /run/user/$PRODUCT_UID; then
+    mount -t tmpfs -o mode=700,uid=$PRODUCT_UID,gid=$PRODUCT_UID tmpfs /run/user/$PRODUCT_UID
+fi
+chmod 700 /run/user/$PRODUCT_UID
+# Never unlink a live generation's Wayland socket: if a Shell is still
+# alive, fail (runsv retries) instead of stealing its socket path.
+if pgrep -x gnome-shell >/dev/null 2>&1; then
+    echo "launcher_fatal_utc=$(date -u '+%Y-%m-%dT%H:%M:%SZ') reason=live-shell-blocks-start" >&2
+    exit 1
+fi
+rm -f /run/user/$PRODUCT_UID/wayland-*.lock /run/user/$PRODUCT_UID/wayland-*
+
+# Clean application session environment (inherited by dbus-daemon and activated services)
+GTK_CLIENT_RUNTIME=/usr/lib/santos-gtk-client-runtime
+export PATH=$GTK_CLIENT_RUNTIME/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+export HOME=$PRODUCT_HOME
+export USER=$PRODUCT_USER
+export LOGNAME=$PRODUCT_USER
+export SHELL=/bin/sh
+export XDG_RUNTIME_DIR=/run/user/$PRODUCT_UID
+export WAYLAND_DISPLAY=wayland-0
+export XDG_SESSION_TYPE=wayland
+export QT_QPA_PLATFORM=wayland
+export XDG_CURRENT_DESKTOP=GNOME
+export XDG_SESSION_DESKTOP=gnome
+export XDG_DATA_DIRS=$GTK_CLIENT_RUNTIME/share:/usr/local/share:/usr/share
+export PULSE_SERVER
+export STATE_DIR
+export PRODUCT_USER
+export SESSION_PGID_FILE
+
+# Install only the session-local D-Bus service overlay. The package owns
+# the templates; no vendor desktop or D-Bus file is rewritten.
+/usr/libexec/santos-gtk-client-routes install-session --runtime-dir /run/user/$PRODUCT_UID
+
+{
+    echo "service_start_utc=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    echo "service_pid=$$"
+    echo "product_user=$PRODUCT_USER"
+    echo "no_timeout=1"
+    echo "f4_fallback=DISABLED"
+    echo "shell_bin=$SHELL_BIN"
+    echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
+    echo "WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
+    echo "XDG_SESSION_TYPE=$XDG_SESSION_TYPE"
+    echo "QT_QPA_PLATFORM=$QT_QPA_PLATFORM"
+    sha256sum "$TLSFIX" "$R/libEGL.so.1.0.0" "$R/libGLESv2.so.2.0.0" \
+        "$INSTALL_ROOT/usr/bin/mutter" "$INSTALL_ROOT/usr/lib/libmutter-51.so.0.0.0" \
+        "$MUTTER_LIB_DIR/libmutter-cogl-51.so.0.0.0" \
+        "$MUTTER_LIB_DIR/libmutter-clutter-51.so.0.0.0" \
+        "$MUTTER_LIB_DIR/libmutter-mtk-51.so.0.0.0" \
+        "$MUTTER_LIB_DIR/Meta-51.gir" "$SHELL_BIN" \
+        "$SHELL_LIB_DIR/libshell-51.so" "$SHELL_LIB_DIR/libst-51.so" \
+        "$SHELL_LIB_DIR/libgnome-shell-menu.so" \
+        "$INSTALL_ROOT/usr/share/glib-2.0/schemas/gschemas.compiled" \
+        "$DEPS_DIR/icu/77.1/icudt77l.dat" \
+        "$GJS_PRIVATE_DIR/GjsPrivate-1.0.typelib" \
+        "$INSTALL_ROOT/usr/share/gnome-shell/gnome-shell-dbus-interfaces.gresource"
+} >> "$STATE_DIR/service-startup.txt" 2>&1
+chown $PRODUCT_USER:$PRODUCT_USER "$STATE_DIR/service-startup.txt" 2>/dev/null || true
+
+if [ ! -x "$SHELL_BIN" ]; then
+    echo "launcher_error_utc=$(date -u '+%Y-%m-%dT%H:%M:%SZ') missing_shell=$SHELL_BIN" >&2
+    touch "$SERVICE_DIR/down"
+    exit 127
+fi
+if [ ! -x "$SESSION_HELPER" ]; then
+    echo "launcher_error_utc=$(date -u '+%Y-%m-%dT%H:%M:%SZ') missing_helper=$SESSION_HELPER" >&2
+    exit 127
+fi
+
+# Single-generation supervision. The session owns a private process group;
+# runit's TERM lands here and is forwarded to exactly that group — never
+# the service group (svlogd lives there). Session exit (any cause) ends
+# this script so runsv restarts exactly one new generation.
+rm -f "$SESSION_PGID_FILE"
+setsid "$SESSION_HELPER" &
+LAUNCH=$!
+PGID=""
+for _ in $(seq 1 100); do
+    if [ -f "$SESSION_PGID_FILE" ]; then
+        PGID=$(cat "$SESSION_PGID_FILE" 2>/dev/null)
+        [ -n "$PGID" ] && kill -0 -$PGID 2>/dev/null && break
+        PGID=""
+    fi
+    kill -0 $LAUNCH 2>/dev/null || {
+        echo "launcher_fatal_utc=$(date -u '+%Y-%m-%dT%H:%M:%SZ') reason=session-helper-exited-early" >&2
+        wait $LAUNCH 2>/dev/null
+        exit 1
+    }
+    sleep 0.1
+done
+[ -n "$PGID" ] || {
+    echo "launcher_fatal_utc=$(date -u '+%Y-%m-%dT%H:%M:%SZ') reason=no-session-pgid" >&2
+    exit 1
+}
+echo "session_pgid=$PGID supervisor_pid=$$ launch_pid=$LAUNCH" >&2
+STOPPING=0
+session_stop() {
+    STOPPING=1
+    kill -TERM -$PGID 2>/dev/null || true
+}
+trap session_stop TERM
+# Reap the setsid parent only when it actually forked (LAUNCH != session
+# pgid). When setsid execs in place, LAUNCH *is* the session leader and
+# waiting on it here would block the supervision loop below forever —
+# which is exactly what silently disabled the want-down self-poll in v4.
+if [ "$LAUNCH" != "$PGID" ]; then
+    wait $LAUNCH 2>/dev/null || true
+fi
+# Steady-state supervision. Stop arrives as runsv-delivered TERM via the
+# trap: control/t (fixed for v5) signals the outer PID itself instead of a
+# nonexistent -$PID group, and the trap forwards to exactly the session
+# group. No flag polling, no PID lists.
+GRACE=0
+while kill -0 -$PGID 2>/dev/null; do
+    sleep 1 &
+    wait $! 2>/dev/null || true
+    if [ "$STOPPING" = 1 ]; then
+        GRACE=$((GRACE + 1))
+        if [ "$GRACE" -ge 5 ]; then
+            kill -KILL -$PGID 2>/dev/null || true
+        fi
+    fi
+done
+exit 0

@@ -1,0 +1,32 @@
+--- a/hybris/egl/platforms/common/eglplatformcommon.cpp
++++ b/hybris/egl/platforms/common/eglplatformcommon.cpp
+@@ -186,7 +186,7 @@
+ 	buffer_handle_t _handle;
+ 	int _stride;
+ 
+-	hybris_gralloc_allocate(width, height, format, usage, &_handle, (uint32_t*)&_stride);
++	ret = hybris_gralloc_allocate(width, height, format, usage, &_handle, (uint32_t*)&_stride);
+ 
+ 	if (ret == 0)
+ 	{
+@@ -346,6 +346,20 @@
+ 		ret = eglextensionsbuf;
+ 		return ret;
+ 	}
++#else
++	if (name == EGL_EXTENSIONS)
++	{
++		const char *ret = (*real_eglQueryString)(dpy, name);
++		static char eglextensionsbuf[1024];
++
++		snprintf(
++			eglextensionsbuf,
++			sizeof(eglextensionsbuf),
++			"%s EGL_HYBRIS_native_buffer ",
++			ret ? ret : "");
++
++		return eglextensionsbuf;
++	}
+ #endif
+ 	return (*real_eglQueryString)(dpy, name);
+ }

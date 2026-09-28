@@ -1,0 +1,40 @@
+--- a/meson.build
++++ b/meson.build
+@@ -1068,6 +1068,19 @@
+     sources += files('video/out/vo_wlshm.c')
+ endif
+ 
++# santos10wifi PowerVR HWC direct VO (always built; runtime-gated).
++# (santos headers via template CFLAGS; sysroot-absolute.)
++sources += files('video/out/vo_santos.c')
++santos_libdir = get_option('prefix') / get_option('libdir') / 'santos-hybris'
++santos_lib_hardware = cc.find_library('hardware', dirs: santos_libdir, required: true)
++santos_lib_hwcwindow = cc.find_library('hybris-hwcomposerwindow', dirs: santos_libdir, required: true)
++santos_lib_common = cc.find_library('hybris-common', dirs: santos_libdir, required: true)
++santos_lib_egl = cc.find_library('EGL', dirs: santos_libdir, required: true)
++santos_lib_glesv2 = cc.find_library('GLESv2', dirs: santos_libdir, required: true)
++santos_lib_sync = cc.find_library('sync', dirs: santos_libdir, required: true)
++dependencies += [santos_lib_hardware, santos_lib_hwcwindow, santos_lib_common,
++                 santos_lib_egl, santos_lib_glesv2, santos_lib_sync]
++
+ dmabuf_wayland = get_option('dmabuf-wayland').require(
+     features['memfd-create'] and features['wayland'],
+     error_message: 'memfd-create or wayland was not found!',
+--- a/video/out/vo.c
++++ b/video/out/vo.c
+@@ -57,6 +57,7 @@
+ extern const struct vo_driver video_out_image;
+ extern const struct vo_driver video_out_lavc;
+ extern const struct vo_driver video_out_caca;
++extern const struct vo_driver video_out_santos;
+ extern const struct vo_driver video_out_drm;
+ extern const struct vo_driver video_out_direct3d;
+ extern const struct vo_driver video_out_sdl;
+@@ -102,6 +103,7 @@
+ #endif
+     &video_out_libmpv,
+     &video_out_null,
++    &video_out_santos,
+ 
+     // should not be auto-selected
+     &video_out_image,

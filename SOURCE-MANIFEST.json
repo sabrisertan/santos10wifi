@@ -1,0 +1,55 @@
+{
+  "format": 1,
+  "date": "2026-09-28",
+  "kind": "experimental-source-preview",
+  "components": [
+    {
+      "name": "linux",
+      "upstream": "https://github.com/torvalds/linux",
+      "base": "237a1c39e8dfd3e1c6f1f023eea37a48ec04cc63",
+      "source_head": "92b0083794ca3840cf445dbae2604241c504340d",
+      "patch": "patches/linux/0001-santos.patch",
+      "changed_files": 99
+    },
+    {
+      "name": "pvr-santos-112",
+      "source_head": "f3469122a8aaf68282e2064ca839ee2e9573805b",
+      "path": "kernel/overlay/drivers/gpu/drm/pvrsgx/santos-112",
+      "note": "Current tracked and untracked sources; other historical DDK variants omitted. CONFIG_SGX is disabled in supplied kernel config."
+    },
+    {
+      "name": "gtk",
+      "upstream": "https://github.com/GNOME/gtk",
+      "base": "7f99ab1a26408b6499a18f353f081e3c0598ea5c",
+      "source_head": "7f99ab1a26408b6499a18f353f081e3c0598ea5c",
+      "patch": "patches/gtk/0001-santos.patch",
+      "changed_files": 73
+    },
+    {
+      "name": "mutter",
+      "upstream": "https://download.gnome.org/sources/mutter/51/mutter-51.0.tar.xz",
+      "base": "411e4095e0820b9711745b1402345d354374388a",
+      "source_head": "d5eba3c8d26610b5b4a74c27bed981e0e5021815",
+      "patch": "patches/mutter/0001-santos.patch",
+      "changed_files": 41,
+      "upstream_sha256": "5d28f3ae225692428fcafb96500d673f34328b698b86960c9c1460d0b1d983b3"
+    },
+    {
+      "name": "pipeline",
+      "upstream": "https://gitlab.com/schmiddi-on-mobile/pipeline/-/archive/4.1.0/pipeline-4.1.0.tar.gz",
+      "base": "36f5274d5caef98ba0acde4b947429bc93fffade",
+      "source_head": "36f5274d5caef98ba0acde4b947429bc93fffade",
+      "patch": "patches/pipeline/0001-santos.patch",
+      "changed_files": 27,
+      "upstream_sha256": "277779a350be719bf0758d7fa4c26899b2f669fd72a6cbc65fa3f48b61d9edd2"
+    },
+    {
+      "name": "gnome-shell",
+      "upstream": "https://download.gnome.org/sources/gnome-shell/51/gnome-shell-51.0.tar.xz",
+      "base": "gnome-shell-51.0.tar.xz",
+      "patch": "patches/gnome-shell/0001-santos.patch",
+      "changed_files": 8,
+      "upstream_sha256": "2179bab13af353427065096af8bf3d30da7b86e0c516e5ba86a14998af9575f6"
+    }
+  ]
+}

@@ -1,0 +1,3 @@
+#!/bin/sh
+# Package-owned PATH route for the scoped GTK4 client runtime.
+exec /usr/libexec/santos-client-environment --profile /etc/santos/gtk4-client.ini --exec /usr/bin/gnome-control-center "$@"

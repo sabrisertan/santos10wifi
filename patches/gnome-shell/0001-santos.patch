@@ -1,0 +1,4377 @@
+diff --git a/js/misc/brightnessManager.js b/js/misc/brightnessManager.js
+index 5e5c1df6e0ab8a6077556457c6df998d25fddfdd..9458717dbd8511eb00c0505e6bf0c0955bcdb964 100644
+--- a/js/misc/brightnessManager.js
++++ b/js/misc/brightnessManager.js
+@@ -9,6 +9,7 @@ import * as SignalTracker from '../misc/signalTracker.js';
+ 
+ const SCALE_VALUE_N_STEPS = 20;
+ const SCALE_VALUE_CHANGE_EPSILON = 0.001;
++const STARTUP_VISIBLE_BRIGHTNESS = 1.0;
+ 
+ const KEYBINDING_SCHEMA = 'org.gnome.shell.keybindings';
+ const POWER_SCHEMA = 'org.gnome.settings-daemon.plugins.power';
+@@ -484,16 +485,25 @@ const MonitorBrightnessScale = GObject.registerClass({
+             }));
+         const nSteps = Math.min(maxSteps, SCALE_VALUE_N_STEPS);
+ 
+-        super(name, initialValue >= 0 ? initialValue : 1.0, nSteps);
++        super(name, initialValue > 0 ? initialValue : 1.0, nSteps);
+ 
+         this._monitor = monitor;
+         this._currentBacklightBrightness = -1;
+         this._scaleFactor = 1.0;
+ 
+-        if (initialValue >= 0)
++        const backlights = this._getBacklights();
++        const currentBrightnessIsVisible = backlights.some(backlight =>
++            this._getRelativeBrightness(backlight) > 0);
++
++        if (initialValue > 0)
+             this.setBacklight(initialValue);
+-        else
++        else if (currentBrightnessIsVisible)
+             this.syncWithBacklight();
++        else
++            // Do not let a persisted/current zero strand the panel black
++            // across a Shell restart. This is a startup-only recovery policy;
++            // normal runtime zero brightness remains supported.
++            this.setBacklight(STARTUP_VISIBLE_BRIGHTNESS);
+ 
+         for (const backlight of this._getBacklights()) {
+             backlight.connectObject('notify::brightness', () => {
+diff --git a/js/ui/keyboard.js b/js/ui/keyboard.js
+index 41fd1c1971614259340bc7d33dacbaf0cbf01f87..c15eb5bf1eca37dd5b8d6f137f83cd34283c21cf 100644
+--- a/js/ui/keyboard.js
++++ b/js/ui/keyboard.js
+@@ -1066,6 +1066,8 @@ export const Keyboard = GObject.registerClass({
+ 
+         this._showIdleId = 0;
+ 
++        this._levelWarmIdleId = 0;
++
+         this._keyboardVisible = false;
+         this._keyboardRequested = false;
+         this._keyboardRestingId = 0;
+@@ -1093,6 +1095,11 @@ export const Keyboard = GObject.registerClass({
+     }
+ 
+     _onDestroy() {
++        if (this._levelWarmIdleId) {
++            GLib.source_remove(this._levelWarmIdleId);
++            this._levelWarmIdleId = 0;
++        }
++
+         if (this._windowMovedId) {
+             this._focusTracker.disconnect(this._windowMovedId);
+             delete this._windowMovedId;
+@@ -1331,6 +1338,47 @@ export const Keyboard = GObject.registerClass({
+         this._currentLayout?.destroy();
+         this._currentLayout = layout;
+         this._layers = layers;
++        this._queueLevelStyleWarm();
++    }
++
++    _queueLevelStyleWarm() {
++        // L141: pre-warm St theme/style of never-shown levels in idle time so
++        // the first level switch does not pay the whole style cascade plus
++        // first map on the input path. Bounded: one idle callback per layout,
++        // existing retained actors only, no new signals or objects.
++        if (this._levelWarmIdleId)
++            return;
++
++        this._levelWarmIdleId = GLib.idle_add_once(GLib.PRIORITY_LOW, () => {
++            this._levelWarmIdleId = 0;
++            this._warmUnmappedLevelStyles();
++        });
++        GLib.Source.set_name_by_id(this._levelWarmIdleId, '[gnome-shell] level-style-warm');
++    }
++
++    _warmUnmappedLevelStyles() {
++        if (!this._layers)
++            return;
++
++        for (const name in this._layers) {
++            const level = this._layers[name];
++            if (level === this._currentPage)
++                continue;
++            this._warmActorTreeStyle(level);
++        }
++    }
++
++    _warmActorTreeStyle(actor) {
++        if (actor instanceof St.Widget) {
++            try {
++                actor.ensure_style();
++            } catch (e) {
++            }
++        }
++
++        const children = actor.get_children?.();
++        if (children)
++            children.forEach(child => this._warmActorTreeStyle(child));
+     }
+ 
+     _addRowKeys(keys, layout, emojiVisible) {
+diff --git a/src/shell-app.c b/src/shell-app.c
+index 9e6a81b6fa9321e1b31d915dba7c4a63cfa3d27a..f2bf5347808cfc3dd987028b698d3ace4c8eb076 100644
+--- a/src/shell-app.c
++++ b/src/shell-app.c
+@@ -1420,12 +1420,10 @@ shell_app_launch (ShellApp           *app,
+   if (discrete_gpu)
+     apply_discrete_gpu_env (context, global);
+ 
+-  /* Set LEAVE_DESCRIPTORS_OPEN in order to use an optimized gspawn
+-   * codepath. The shell's open file descriptors should be marked CLOEXEC
+-   * so that they are automatically closed even with this flag set.
++  /* In Santos, vendor/hybris libraries (PVR/gralloc) do not set CLOEXEC
++   * on /dev/dri/card0 and sync fences. Do not leave descriptors open.
+    */
+-  flags = G_SPAWN_SEARCH_PATH | G_SPAWN_DO_NOT_REAP_CHILD |
+-          G_SPAWN_LEAVE_DESCRIPTORS_OPEN;
++  flags = G_SPAWN_SEARCH_PATH | G_SPAWN_DO_NOT_REAP_CHILD;
+ 
+   /* Optimized spawn path, avoiding a child_setup function */
+   {
+diff --git a/src/shell-app.c.orig b/src/shell-app.c.orig
+new file mode 100644
+index 0000000000000000000000000000000000000000..9e6a81b6fa9321e1b31d915dba7c4a63cfa3d27a
+--- /dev/null
++++ b/src/shell-app.c.orig
+@@ -0,0 +1,1869 @@
++/* -*- mode: C; c-file-style: "gnu"; indent-tabs-mode: nil; -*- */
++
++#include "config.h"
++
++#include <errno.h>
++#include <string.h>
++#include <unistd.h>
++
++#include <glib/gi18n-lib.h>
++#include <glib/gstdio.h>
++#include <systemd/sd-journal.h>
++
++#include <meta/display.h>
++#include <meta/meta-context.h>
++#include <meta/meta-workspace-manager.h>
++
++#include "shell-app-private.h"
++#include "shell-enum-types.h"
++#include "shell-global.h"
++#include "shell-util.h"
++#include "shell-app-system-private.h"
++#include "st.h"
++#include "gtkactionmuxer.h"
++#include "org-gtk-application.h"
++#include "switcheroo-control.h"
++
++/* This is mainly a memory usage optimization - the user is going to
++ * be running far fewer of the applications at one time than they have
++ * installed.  But it also just helps keep the code more logically
++ * separated.
++ */
++typedef struct {
++  guint refcount;
++
++  /* Signal connection to dirty window sort list on workspace changes */
++  gulong workspace_switch_id;
++
++  GSList *windows;
++
++  guint interesting_windows;
++
++  /* Whether or not we need to resort the windows; this is done on demand */
++  guint window_sort_stale : 1;
++
++  /* See GApplication documentation */
++  GtkActionMuxer   *muxer;
++  char             *unique_bus_name;
++  GDBusConnection  *session;
++
++  /* GDBus Proxy for getting application busy state */
++  ShellOrgGtkApplication *application_proxy;
++  GCancellable           *cancellable;
++
++} ShellAppRunningState;
++
++/**
++ * ShellApp:
++ *
++ * Object representing an application
++ *
++ * This object wraps a #GDesktopAppInfo, providing methods and signals
++ * primarily useful for running applications.
++ */
++struct _ShellApp
++{
++  GObject parent;
++
++  int started_on_workspace;
++
++  ShellAppState state;
++
++  GDesktopAppInfo *info; /* If NULL, this app is backed by one or more
++                          * MetaWindow.  For purposes of app title
++                          * etc., we use the first window added,
++                          * because it's most likely to be what we
++                          * want (e.g. it will be of TYPE_NORMAL from
++                          * the way shell-window-tracker.c works).
++                          */
++  GIcon *fallback_icon;
++
++  ShellAppRunningState *running_state;
++
++  char *window_id_string;
++  char *name_collation_key;
++};
++
++enum {
++  PROP_0,
++
++  PROP_STATE,
++  PROP_BUSY,
++  PROP_ID,
++  PROP_ACTION_GROUP,
++  PROP_ICON,
++  PROP_APP_INFO,
++
++  N_PROPS
++};
++
++static GParamSpec *props[N_PROPS] = { NULL, };
++
++enum {
++  WINDOWS_CHANGED,
++  LAST_SIGNAL
++};
++
++static guint shell_app_signals[LAST_SIGNAL] = { 0 };
++
++static void create_running_state (ShellApp *app);
++static void unref_running_state (ShellAppRunningState *state);
++
++G_DEFINE_TYPE (ShellApp, shell_app, G_TYPE_OBJECT)
++
++static void
++shell_app_get_property (GObject    *gobject,
++                        guint       prop_id,
++                        GValue     *value,
++                        GParamSpec *pspec)
++{
++  ShellApp *app = SHELL_APP (gobject);
++
++  switch (prop_id)
++    {
++    case PROP_STATE:
++      g_value_set_enum (value, app->state);
++      break;
++    case PROP_BUSY:
++      g_value_set_boolean (value, shell_app_get_busy (app));
++      break;
++    case PROP_ID:
++      g_value_set_string (value, shell_app_get_id (app));
++      break;
++    case PROP_ICON:
++      g_value_set_object (value, shell_app_get_icon (app));
++      break;
++    case PROP_ACTION_GROUP:
++      g_value_set_object (value, shell_app_get_action_group (app));
++      break;
++    case PROP_APP_INFO:
++      if (app->info)
++        g_value_set_object (value, app->info);
++      break;
++    default:
++      G_OBJECT_WARN_INVALID_PROPERTY_ID (gobject, prop_id, pspec);
++      break;
++    }
++}
++
++static void
++shell_app_set_property (GObject      *gobject,
++                        guint         prop_id,
++                        const GValue *value,
++                        GParamSpec   *pspec)
++{
++  ShellApp *app = SHELL_APP (gobject);
++
++  switch (prop_id)
++    {
++    case PROP_APP_INFO:
++      _shell_app_set_app_info (app, g_value_get_object (value));
++      break;
++    default:
++      G_OBJECT_WARN_INVALID_PROPERTY_ID (gobject, prop_id, pspec);
++      break;
++    }
++}
++
++const char *
++shell_app_get_id (ShellApp *app)
++{
++  if (app->info)
++    return g_app_info_get_id (G_APP_INFO (app->info));
++  return app->window_id_string;
++}
++
++static MetaWindow *
++window_backed_app_get_window (ShellApp     *app)
++{
++  g_assert (app->info == NULL);
++  if (app->running_state)
++    {
++      g_assert (app->running_state->windows);
++      return app->running_state->windows->data;
++    }
++  else
++    return NULL;
++}
++
++/**
++ * shell_app_get_icon:
++ *
++ * Look up the icon for this application
++ *
++ * Return value: (transfer none): A #GIcon
++ */
++GIcon *
++shell_app_get_icon (ShellApp *app)
++{
++  g_return_val_if_fail (SHELL_IS_APP (app), NULL);
++
++  if (app->info)
++    return g_app_info_get_icon (G_APP_INFO (app->info));
++
++  if (!app->fallback_icon)
++    app->fallback_icon = g_themed_icon_new ("application-x-executable");
++
++  return app->fallback_icon;
++}
++
++/**
++ * shell_app_get_action_group:
++ *
++ * Return value: (transfer none) (nullable):
++ */
++GActionGroup *
++shell_app_get_action_group (ShellApp *app)
++{
++  g_return_val_if_fail (SHELL_IS_APP (app), NULL);
++
++  if (app->running_state)
++    return G_ACTION_GROUP (app->running_state->muxer);
++  return NULL;
++}
++
++/**
++ * shell_app_create_icon_texture:
++ *
++ * Look up the icon for this application, and create a #ClutterActor
++ * for it at the given size.
++ *
++ * Return value: (transfer none): A floating #ClutterActor
++ */
++ClutterActor *
++shell_app_create_icon_texture (ShellApp   *app,
++                               int         size)
++{
++  ClutterActor *ret;
++
++  ret = st_icon_new ();
++  st_icon_set_icon_size (ST_ICON (ret), size);
++  st_icon_set_fallback_icon_name (ST_ICON (ret), "application-x-executable");
++
++  g_object_bind_property (app, "icon", ret, "gicon", G_BINDING_SYNC_CREATE);
++
++  if (shell_app_is_window_backed (app))
++    st_widget_add_style_class_name (ST_WIDGET (ret), "fallback-app-icon");
++
++  return ret;
++}
++
++const char *
++shell_app_get_name (ShellApp *app)
++{
++  if (app->info)
++    return g_app_info_get_name (G_APP_INFO (app->info));
++  else
++    {
++      MetaWindow *window = window_backed_app_get_window (app);
++      const char *name = NULL;
++
++      if (window)
++        name = meta_window_get_wm_class (window);
++      if (!name)
++        name = C_("program", "Unknown");
++      return name;
++    }
++}
++
++const char *
++shell_app_get_description (ShellApp *app)
++{
++  if (app->info)
++    return g_app_info_get_description (G_APP_INFO (app->info));
++  else
++    return NULL;
++}
++
++/**
++ * shell_app_is_window_backed:
++ *
++ * A window backed application is one which represents just an open
++ * window, i.e. there's no .desktop file association, so we don't know
++ * how to launch it again.
++ */
++gboolean
++shell_app_is_window_backed (ShellApp *app)
++{
++  return app->info == NULL;
++}
++
++typedef struct {
++  MetaWorkspace *workspace;
++  GSList **transients;
++} CollectTransientsData;
++
++static gboolean
++collect_transients_on_workspace (MetaWindow *window,
++                                 gpointer    datap)
++{
++  CollectTransientsData *data = datap;
++
++  if (data->workspace && meta_window_get_workspace (window) != data->workspace)
++    return TRUE;
++
++  *data->transients = g_slist_prepend (*data->transients, window);
++  return TRUE;
++}
++
++/* The basic idea here is that when we're targeting a window,
++ * if it has transients we want to pick the most recent one
++ * the user interacted with.
++ * This function makes raising GEdit with the file chooser
++ * open work correctly.
++ */
++static MetaWindow *
++find_most_recent_transient_on_same_workspace (MetaDisplay *display,
++                                              MetaWindow  *reference)
++{
++  GSList *transients, *transients_sorted, *iter;
++  MetaWindow *result;
++  CollectTransientsData data;
++
++  transients = NULL;
++  data.workspace = meta_window_get_workspace (reference);
++  data.transients = &transients;
++
++  meta_window_foreach_transient (reference, collect_transients_on_workspace, &data);
++
++  transients_sorted = meta_display_sort_windows_by_stacking (display, transients);
++  /* Reverse this so we're top-to-bottom (yes, we should probably change the order
++   * returned from the sort_windows_by_stacking function)
++   */
++  transients_sorted = g_slist_reverse (transients_sorted);
++  g_clear_slist (&transients, NULL);
++
++  result = NULL;
++  for (iter = transients_sorted; iter; iter = iter->next)
++    {
++      MetaWindow *window = iter->data;
++      MetaWindowType wintype = meta_window_get_window_type (window);
++
++      /* Don't want to focus UTILITY types, like the Gimp toolbars */
++      if (wintype == META_WINDOW_NORMAL ||
++          wintype == META_WINDOW_DIALOG)
++        {
++          result = window;
++          break;
++        }
++    }
++  g_slist_free (transients_sorted);
++  return result;
++}
++
++static MetaWorkspace *
++get_active_workspace (void)
++{
++  ShellGlobal *global = shell_global_get ();
++  MetaDisplay *display = shell_global_get_display (global);
++  MetaWorkspaceManager *workspace_manager =
++    meta_display_get_workspace_manager (display);
++
++  return meta_workspace_manager_get_active_workspace (workspace_manager);
++}
++
++/**
++ * shell_app_activate_window:
++ * @app: a #ShellApp
++ * @window: (nullable): Window to be focused
++ * @timestamp: Event timestamp
++ *
++ * Bring all windows for the given app to the foreground,
++ * but ensure that @window is on top.  If @window is %NULL,
++ * the window with the most recent user time for the app
++ * will be used.
++ *
++ * This function has no effect if @app is not currently running.
++ */
++void
++shell_app_activate_window (ShellApp     *app,
++                           MetaWindow   *window,
++                           guint32       timestamp)
++{
++  g_autoptr (GSList) windows = NULL;
++
++  if (shell_app_get_state (app) != SHELL_APP_STATE_RUNNING)
++    return;
++
++  windows = shell_app_get_windows (app);
++  if (window == NULL && windows)
++    window = windows->data;
++
++  if (!g_slist_find (windows, window))
++    return;
++  else
++    {
++      GSList *windows_reversed, *iter;
++      ShellGlobal *global = shell_global_get ();
++      MetaDisplay *display = shell_global_get_display (global);
++      MetaWorkspace *active = get_active_workspace ();
++      MetaWorkspace *workspace = meta_window_get_workspace (window);
++      guint32 last_user_timestamp = meta_display_get_last_user_time (display);
++      MetaWindow *most_recent_transient;
++
++      if (meta_display_xserver_time_is_before (display, timestamp, last_user_timestamp))
++        {
++          meta_window_set_demands_attention (window);
++          return;
++        }
++
++      /* Now raise all the other windows for the app that are on
++       * the same workspace, in reverse order to preserve the stacking.
++       */
++      windows_reversed = g_slist_copy (windows);
++      windows_reversed = g_slist_reverse (windows_reversed);
++      for (iter = windows_reversed; iter; iter = iter->next)
++        {
++          MetaWindow *other_window = iter->data;
++
++          if (other_window != window)
++            meta_window_raise_and_make_recent_on_workspace (other_window, workspace);
++        }
++      g_slist_free (windows_reversed);
++
++      /* If we have a transient that the user's interacted with more recently than
++       * the window, pick that.
++       */
++      most_recent_transient = find_most_recent_transient_on_same_workspace (display, window);
++      if (most_recent_transient
++          && meta_display_xserver_time_is_before (display,
++                                                  meta_window_get_user_time (window),
++                                                  meta_window_get_user_time (most_recent_transient)))
++        window = most_recent_transient;
++
++
++      if (active != workspace)
++        meta_workspace_activate_with_focus (workspace, window, timestamp);
++      else
++        meta_window_activate (window, timestamp);
++    }
++}
++
++
++void
++shell_app_update_window_actions (ShellApp *app, MetaWindow *window)
++{
++  const char *object_path;
++
++  object_path = meta_window_get_gtk_window_object_path (window);
++  if (object_path != NULL)
++    {
++      GActionGroup *actions;
++
++      actions = g_object_get_data (G_OBJECT (window), "actions");
++      if (actions == NULL)
++        {
++          actions = G_ACTION_GROUP (g_dbus_action_group_get (app->running_state->session,
++                                                             meta_window_get_gtk_unique_bus_name (window),
++                                                             object_path));
++          g_object_set_data_full (G_OBJECT (window), "actions", actions, g_object_unref);
++        }
++
++      g_assert (app->running_state->muxer);
++      gtk_action_muxer_insert (app->running_state->muxer, "win", actions);
++      g_object_notify_by_pspec (G_OBJECT (app), props[PROP_ACTION_GROUP]);
++    }
++}
++
++/**
++ * shell_app_activate:
++ * @app: a #ShellApp
++ *
++ * Like shell_app_activate_full(), but using the default workspace and
++ * event timestamp.
++ */
++void
++shell_app_activate (ShellApp      *app)
++{
++  return shell_app_activate_full (app, -1, 0);
++}
++
++/**
++ * shell_app_activate_full:
++ * @app: a #ShellApp
++ * @workspace: launch on this workspace, or -1 for default. Ignored if
++ *   activating an existing window
++ * @timestamp: Event timestamp
++ *
++ * Perform an appropriate default action for operating on this application,
++ * dependent on its current state.  For example, if the application is not
++ * currently running, launch it.  If it is running, activate the most
++ * recently used NORMAL window (or if that window has a transient, the most
++ * recently used transient for that window).
++ */
++void
++shell_app_activate_full (ShellApp      *app,
++                         int            workspace,
++                         guint32        timestamp)
++{
++  ShellGlobal *global;
++
++  global = shell_global_get ();
++
++  if (timestamp == 0)
++    timestamp = shell_global_get_current_time (global);
++
++  switch (app->state)
++    {
++      case SHELL_APP_STATE_STOPPED:
++        {
++          GError *error = NULL;
++          if (!shell_app_launch (app, timestamp, workspace, SHELL_APP_LAUNCH_GPU_APP_PREF, &error))
++            {
++              char *msg;
++              msg = g_strdup_printf (_("Failed to launch “%s”"), shell_app_get_name (app));
++              shell_global_notify_error (global,
++                                         msg,
++                                         error->message);
++              g_free (msg);
++              g_clear_error (&error);
++            }
++        }
++        break;
++      case SHELL_APP_STATE_STARTING:
++        break;
++      case SHELL_APP_STATE_RUNNING:
++        shell_app_activate_window (app, NULL, timestamp);
++        break;
++      default:
++        g_assert_not_reached();
++        break;
++    }
++}
++
++static GVariant *
++get_platform_data (ShellApp *app,
++                   guint     timestamp,
++                   int       workspace)
++{
++  GVariantBuilder builder;
++  ShellGlobal *global;
++  g_autoptr (GAppLaunchContext) context = NULL;
++  gchar *startup_id;
++
++  g_variant_builder_init (&builder, G_VARIANT_TYPE_VARDICT);
++
++  global = shell_global_get ();
++  context = shell_global_create_app_launch_context (global, timestamp, workspace);
++
++  if (!context)
++    return g_variant_builder_end (&builder);
++
++  startup_id = g_app_launch_context_get_startup_notify_id (context, NULL, NULL);
++
++  if (!startup_id)
++    return g_variant_builder_end (&builder);
++
++
++  g_variant_builder_add (&builder, "{sv}",
++      "desktop-startup-id", g_variant_new_string (startup_id));
++  g_variant_builder_add (&builder, "{sv}",
++      "activation-token", g_variant_new_take_string (g_steal_pointer (&startup_id)));
++
++  return g_variant_builder_end (&builder);
++}
++
++/**
++ * shell_app_open_new_window:
++ * @app: a #ShellApp
++ * @workspace: open on this workspace, or -1 for default
++ *
++ * Request that the application create a new window.
++ */
++void
++shell_app_open_new_window (ShellApp      *app,
++                           int            workspace)
++{
++  GActionGroup *group = NULL;
++  const char * const *actions;
++
++  g_return_if_fail (app->info != NULL);
++
++  /* First check whether the application provides a "new-window" desktop
++   * action - it is a safe bet that it will open a new window, and activating
++   * it will trigger startup notification if necessary
++   */
++  actions = g_desktop_app_info_list_actions (G_DESKTOP_APP_INFO (app->info));
++
++  if (g_strv_contains (actions, "new-window"))
++    {
++      shell_app_launch_action (app, "new-window", 0, workspace);
++      return;
++    }
++
++  /* Next, check whether the app exports an explicit "new-window" action
++   * that we can activate on the bus - the muxer will add startup notification
++   * information to the platform data, so this should work just as well as
++   * desktop actions.
++   */
++  group = app->running_state ? G_ACTION_GROUP (app->running_state->muxer)
++                             : NULL;
++
++  if (group &&
++      g_action_group_has_action (group, "app.new-window") &&
++      g_action_group_get_action_parameter_type (group, "app.new-window") == NULL)
++    {
++      gtk_action_muxer_activate_action_full (GTK_ACTION_MUXER (group), "app.new-window",
++                                             NULL, get_platform_data (app, 0, workspace));
++      return;
++    }
++
++  /* Lastly, just always launch the application again, even if we know
++   * it was already running.  For most applications this
++   * should have the effect of creating a new window, whether that's
++   * a second process (in the case of Calculator) or IPC to existing
++   * instance (Firefox).  There are a few less-sensical cases such
++   * as say Pidgin.
++   */
++  shell_app_launch (app, 0, workspace, SHELL_APP_LAUNCH_GPU_APP_PREF, NULL);
++}
++
++/**
++ * shell_app_can_open_new_window:
++ * @app: a #ShellApp
++ *
++ * Returns %TRUE if the app supports opening a new window through
++ * shell_app_open_new_window() (ie, if calling that function will
++ * result in actually opening a new window and not something else,
++ * like presenting the most recently active one)
++ */
++gboolean
++shell_app_can_open_new_window (ShellApp *app)
++{
++  ShellAppRunningState *state;
++  MetaWindow *window;
++  GDesktopAppInfo *desktop_info;
++  const char * const *desktop_actions;
++
++  /* Apps that are stopped can always open new windows, because
++   * activating them would open the first one; if they are starting,
++   * we cannot tell whether they can open additional windows until
++   * they are running */
++  if (app->state != SHELL_APP_STATE_RUNNING)
++    return app->state == SHELL_APP_STATE_STOPPED;
++
++  state = app->running_state;
++
++  /* If the app has an explicit new-window action, then it can
++     (or it should be able to) ...
++  */
++  if (g_action_group_has_action (G_ACTION_GROUP (state->muxer), "app.new-window"))
++    return TRUE;
++
++  /* If the app doesn't have a desktop file, then nothing is possible */
++  if (!app->info)
++    return FALSE;
++
++  desktop_info = G_DESKTOP_APP_INFO (app->info);
++
++  /* If the app is explicitly telling us via its desktop file, then we know
++   * for sure
++  */
++  if (g_desktop_app_info_has_key (desktop_info, "SingleMainWindow"))
++      return !g_desktop_app_info_get_boolean (desktop_info,
++                                              "SingleMainWindow");
++
++  /* GNOME-specific key, for backwards compatibility with apps that haven't
++   * started using the XDG "SingleMainWindow" key yet
++  */
++  if (g_desktop_app_info_has_key (desktop_info, "X-GNOME-SingleWindow"))
++    return !g_desktop_app_info_get_boolean (desktop_info,
++                                            "X-GNOME-SingleWindow");
++
++  /* If it has a new-window desktop action, it should be able to */
++  desktop_actions = g_desktop_app_info_list_actions (desktop_info);
++  if (desktop_actions && g_strv_contains (desktop_actions, "new-window"))
++    return TRUE;
++
++  /* If this is a unique GtkApplication, and we don't have a new-window, then
++     probably we can't
++
++     We don't consider non-unique GtkApplications here to handle cases like
++     evince, which don't export a new-window action because each window is in
++     a different process. In any case, in a non-unique GtkApplication each
++     Activate() knows nothing about the other instances, so it will show a
++     new window.
++  */
++
++  window = state->windows->data;
++
++  if (state->unique_bus_name != NULL &&
++      meta_window_get_gtk_application_object_path (window) != NULL)
++    {
++      if (meta_window_get_gtk_application_id (window) != NULL)
++        return FALSE;
++      else
++        return TRUE;
++    }
++
++  /* In all other cases, we don't have a reliable source of information
++     or a decent heuristic, so we err on the compatibility side and say
++     yes.
++  */
++  return TRUE;
++}
++
++/**
++ * shell_app_get_state:
++ * @app: a #ShellApp
++ *
++ * Returns: State of the application
++ */
++ShellAppState
++shell_app_get_state (ShellApp *app)
++{
++  return app->state;
++}
++
++typedef struct {
++  ShellApp *app;
++  MetaWorkspace *active_workspace;
++} CompareWindowsData;
++
++static int
++shell_app_compare_windows (gconstpointer   a,
++                           gconstpointer   b,
++                           gpointer        datap)
++{
++  MetaWindow *win_a = (gpointer)a;
++  MetaWindow *win_b = (gpointer)b;
++  CompareWindowsData *data = datap;
++  gboolean ws_a, ws_b;
++  gboolean vis_a, vis_b;
++
++  ws_a = meta_window_get_workspace (win_a) == data->active_workspace;
++  ws_b = meta_window_get_workspace (win_b) == data->active_workspace;
++
++  if (ws_a && !ws_b)
++    return -1;
++  else if (!ws_a && ws_b)
++    return 1;
++
++  vis_a = meta_window_showing_on_its_workspace (win_a);
++  vis_b = meta_window_showing_on_its_workspace (win_b);
++
++  if (vis_a && !vis_b)
++    return -1;
++  else if (!vis_a && vis_b)
++    return 1;
++
++  return meta_window_get_user_time (win_b) - meta_window_get_user_time (win_a);
++}
++
++/**
++ * shell_app_get_windows:
++ * @app:
++ *
++ * Get the windows which are associated with this application. The
++ * returned list will be sorted first by whether they're on the
++ * active workspace, then by whether they're visible, and finally
++ * by the time the user last interacted with them.
++ *
++ * Returns: (transfer container) (element-type MetaWindow): List of windows
++ */
++GSList *
++shell_app_get_windows (ShellApp *app)
++{
++  GSList *windows = NULL;
++  GSList *l;
++
++  if (app->running_state == NULL)
++    return NULL;
++
++  if (app->running_state->window_sort_stale)
++    {
++      CompareWindowsData data;
++      data.app = app;
++      data.active_workspace = get_active_workspace ();
++      app->running_state->windows = g_slist_sort_with_data (app->running_state->windows, shell_app_compare_windows, &data);
++      app->running_state->window_sort_stale = FALSE;
++    }
++
++  for (l = app->running_state->windows; l; l = l->next)
++    if (!meta_window_is_override_redirect (META_WINDOW (l->data)))
++      windows = g_slist_prepend (windows, l->data);
++
++  return g_slist_reverse (windows);
++}
++
++guint
++shell_app_get_n_windows (ShellApp *app)
++{
++  if (app->running_state == NULL)
++    return 0;
++  return g_slist_length (app->running_state->windows);
++}
++
++gboolean
++shell_app_is_on_workspace (ShellApp *app,
++                           MetaWorkspace   *workspace)
++{
++  GSList *iter;
++
++  if (shell_app_get_state (app) == SHELL_APP_STATE_STARTING)
++    {
++      if (app->started_on_workspace == -1 ||
++          meta_workspace_index (workspace) == app->started_on_workspace)
++        return TRUE;
++      else
++        return FALSE;
++    }
++
++  if (app->running_state == NULL)
++    return FALSE;
++
++  for (iter = app->running_state->windows; iter; iter = iter->next)
++    {
++      if (meta_window_get_workspace (iter->data) == workspace)
++        return TRUE;
++    }
++
++  return FALSE;
++}
++
++static int
++shell_app_get_last_user_time (ShellApp *app)
++{
++  GSList *iter;
++  guint32 last_user_time;
++
++  last_user_time = 0;
++
++  if (app->running_state != NULL)
++    {
++      for (iter = app->running_state->windows; iter; iter = iter->next)
++        last_user_time = MAX (last_user_time, meta_window_get_user_time (iter->data));
++    }
++
++  return (int)last_user_time;
++}
++
++static gboolean
++shell_app_is_minimized (ShellApp *app)
++{
++  GSList *iter;
++
++  if (app->running_state == NULL)
++    return FALSE;
++
++  for (iter = app->running_state->windows; iter; iter = iter->next)
++    {
++      if (meta_window_showing_on_its_workspace (iter->data))
++        return FALSE;
++    }
++
++  return TRUE;
++}
++
++/**
++ * shell_app_compare:
++ * @app:
++ * @other: A #ShellApp
++ *
++ * Compare one #ShellApp instance to another, in the following way:
++ *   - Running applications sort before not-running applications.
++ *   - If one of them has non-minimized windows and the other does not,
++ *     the one with visible windows is first.
++ *   - Finally, the application which the user interacted with most recently
++ *     compares earlier.
++ */
++int
++shell_app_compare (ShellApp *app,
++                   ShellApp *other)
++{
++  gboolean min_app, min_other;
++
++  if (app->state != other->state)
++    {
++      if (app->state == SHELL_APP_STATE_RUNNING)
++        return -1;
++      return 1;
++    }
++
++  min_app = shell_app_is_minimized (app);
++  min_other = shell_app_is_minimized (other);
++
++  if (min_app != min_other)
++    {
++      if (min_other)
++        return -1;
++      return 1;
++    }
++
++  if (app->state == SHELL_APP_STATE_RUNNING)
++    {
++      if (app->running_state->windows && !other->running_state->windows)
++        return -1;
++      else if (!app->running_state->windows && other->running_state->windows)
++        return 1;
++
++      return shell_app_get_last_user_time (other) - shell_app_get_last_user_time (app);
++    }
++
++  return 0;
++}
++
++ShellApp *
++_shell_app_new_for_window (MetaWindow      *window)
++{
++  ShellApp *app;
++
++  app = g_object_new (SHELL_TYPE_APP, NULL);
++
++  app->window_id_string = g_strdup_printf ("window:%d", meta_window_get_stable_sequence (window));
++
++  _shell_app_add_window (app, window);
++
++  return app;
++}
++
++ShellApp *
++_shell_app_new (GDesktopAppInfo *info)
++{
++  ShellApp *app;
++
++  app = g_object_new (SHELL_TYPE_APP,
++                      "app-info", info,
++                      NULL);
++
++  return app;
++}
++
++void
++_shell_app_set_app_info (ShellApp        *app,
++                         GDesktopAppInfo *info)
++{
++  g_set_object (&app->info, info);
++
++  g_clear_pointer (&app->name_collation_key, g_free);
++  if (app->info)
++    app->name_collation_key = g_utf8_collate_key (shell_app_get_name (app), -1);
++}
++
++static void
++shell_app_state_transition (ShellApp      *app,
++                            ShellAppState  state)
++{
++  if (app->state == state)
++    return;
++  g_return_if_fail (!(app->state == SHELL_APP_STATE_RUNNING &&
++                      state == SHELL_APP_STATE_STARTING));
++  app->state = state;
++
++  _shell_app_system_notify_app_state_changed (shell_app_system_get_default (), app);
++
++  g_object_notify_by_pspec (G_OBJECT (app), props[PROP_STATE]);
++}
++
++static void
++shell_app_on_user_time_changed (MetaWindow *window,
++                                GParamSpec *pspec,
++                                ShellApp   *app)
++{
++  g_assert (app->running_state != NULL);
++
++  /* Ideally we don't want to emit windows-changed if the sort order
++   * isn't actually changing. This check catches most of those.
++   */
++  if (window != app->running_state->windows->data)
++    {
++      app->running_state->window_sort_stale = TRUE;
++      g_signal_emit (app, shell_app_signals[WINDOWS_CHANGED], 0);
++    }
++}
++
++static void
++shell_app_sync_running_state (ShellApp *app)
++{
++  g_return_if_fail (app->running_state != NULL);
++
++  if (app->state != SHELL_APP_STATE_STARTING)
++    {
++      if (app->running_state->interesting_windows == 0)
++        shell_app_state_transition (app, SHELL_APP_STATE_STOPPED);
++      else
++        shell_app_state_transition (app, SHELL_APP_STATE_RUNNING);
++    }
++}
++
++
++static void
++shell_app_on_skip_taskbar_changed (MetaWindow *window,
++                                   GParamSpec *pspec,
++                                   ShellApp   *app)
++{
++  g_assert (app->running_state != NULL);
++
++  /* we rely on MetaWindow:skip-taskbar only being notified
++   * when it actually changes; when that assumption breaks,
++   * we'll have to track the "interesting" windows themselves
++   */
++  if (meta_window_is_skip_taskbar (window))
++    app->running_state->interesting_windows--;
++  else
++    app->running_state->interesting_windows++;
++
++  shell_app_sync_running_state (app);
++}
++
++static void
++shell_app_on_ws_switch (MetaWorkspaceManager *workspace_manager,
++                        int                   from,
++                        int                   to,
++                        MetaMotionDirection   direction,
++                        gpointer              data)
++{
++  ShellApp *app = SHELL_APP (data);
++
++  g_assert (app->running_state != NULL);
++
++  app->running_state->window_sort_stale = TRUE;
++
++  g_signal_emit (app, shell_app_signals[WINDOWS_CHANGED], 0);
++}
++
++gboolean
++shell_app_get_busy (ShellApp *app)
++{
++  if (app->running_state != NULL &&
++      app->running_state->application_proxy != NULL &&
++      shell_org_gtk_application_get_busy (app->running_state->application_proxy))
++    return TRUE;
++
++  return FALSE;
++}
++
++static void
++busy_changed_cb (GObject    *object,
++                 GParamSpec *pspec,
++                 gpointer    user_data)
++{
++  ShellApp *app = user_data;
++
++  g_assert (SHELL_IS_APP (app));
++
++  g_object_notify_by_pspec (G_OBJECT (app), props[PROP_BUSY]);
++}
++
++static void
++get_application_proxy (GObject      *source,
++                       GAsyncResult *result,
++                       gpointer      user_data)
++{
++  ShellApp *app = user_data;
++  ShellOrgGtkApplication *proxy;
++  g_autoptr (GError) error = NULL;
++
++  g_assert (SHELL_IS_APP (app));
++
++  proxy = shell_org_gtk_application_proxy_new_finish (result, &error);
++  if (proxy != NULL)
++    {
++      app->running_state->application_proxy = proxy;
++      g_signal_connect (proxy,
++                        "notify::busy",
++                        G_CALLBACK (busy_changed_cb),
++                        app);
++      if (shell_org_gtk_application_get_busy (proxy))
++        g_object_notify_by_pspec (G_OBJECT (app), props[PROP_BUSY]);
++    }
++
++  if (app->running_state != NULL &&
++      !g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
++    g_clear_object (&app->running_state->cancellable);
++
++  g_object_unref (app);
++}
++
++static void
++shell_app_ensure_busy_watch (ShellApp *app)
++{
++  ShellAppRunningState *running_state = app->running_state;
++  MetaWindow *window;
++  const gchar *object_path;
++
++  if (running_state->application_proxy != NULL ||
++      running_state->cancellable != NULL)
++    return;
++
++  if (running_state->unique_bus_name == NULL)
++    return;
++
++  window = g_slist_nth_data (running_state->windows, 0);
++  object_path = meta_window_get_gtk_application_object_path (window);
++
++  if (object_path == NULL)
++    return;
++
++  running_state->cancellable = g_cancellable_new();
++  /* Take a reference to app to make sure it isn't finalized before
++     get_application_proxy runs */
++  shell_org_gtk_application_proxy_new (running_state->session,
++                                       G_DBUS_PROXY_FLAGS_DO_NOT_AUTO_START,
++                                       running_state->unique_bus_name,
++                                       object_path,
++                                       running_state->cancellable,
++                                       get_application_proxy,
++                                       g_object_ref (app));
++}
++
++void
++_shell_app_add_window (ShellApp        *app,
++                       MetaWindow      *window)
++{
++  if (app->running_state && g_slist_find (app->running_state->windows, window))
++    return;
++
++  g_object_freeze_notify (G_OBJECT (app));
++
++  if (!app->running_state)
++      create_running_state (app);
++
++  app->running_state->window_sort_stale = TRUE;
++  app->running_state->windows = g_slist_prepend (app->running_state->windows, g_object_ref (window));
++  g_signal_connect_object (window, "notify::user-time", G_CALLBACK(shell_app_on_user_time_changed), app, 0);
++  g_signal_connect_object (window, "notify::skip-taskbar", G_CALLBACK(shell_app_on_skip_taskbar_changed), app, 0);
++
++  shell_app_update_app_actions (app, window);
++  shell_app_ensure_busy_watch (app);
++
++  if (!meta_window_is_skip_taskbar (window))
++    app->running_state->interesting_windows++;
++  shell_app_sync_running_state (app);
++
++  if (app->started_on_workspace >= 0 && !meta_window_is_on_all_workspaces (window))
++    meta_window_change_workspace_by_index (window, app->started_on_workspace, FALSE);
++  app->started_on_workspace = -1;
++
++  g_object_thaw_notify (G_OBJECT (app));
++
++  g_signal_emit (app, shell_app_signals[WINDOWS_CHANGED], 0);
++}
++
++void
++_shell_app_remove_window (ShellApp   *app,
++                          MetaWindow *window)
++{
++  g_assert (app->running_state != NULL);
++
++  if (!g_slist_find (app->running_state->windows, window))
++    return;
++
++  app->running_state->windows = g_slist_remove (app->running_state->windows, window);
++
++  if (!meta_window_is_skip_taskbar (window))
++    app->running_state->interesting_windows--;
++  shell_app_sync_running_state (app);
++
++  if (app->running_state->windows == NULL)
++    g_clear_pointer (&app->running_state, unref_running_state);
++
++  g_signal_handlers_disconnect_by_func (window, G_CALLBACK(shell_app_on_user_time_changed), app);
++  g_signal_handlers_disconnect_by_func (window, G_CALLBACK(shell_app_on_skip_taskbar_changed), app);
++
++  g_object_unref (window);
++
++  g_signal_emit (app, shell_app_signals[WINDOWS_CHANGED], 0);
++}
++
++/**
++ * shell_app_get_pids:
++ * @app: a #ShellApp
++ *
++ * Returns: (transfer container) (element-type int): An unordered list of process identifiers associated with this application.
++ */
++GSList *
++shell_app_get_pids (ShellApp *app)
++{
++  GSList *result;
++  g_autoptr (GSList) windows = NULL;
++  GSList *iter;
++
++  result = NULL;
++  windows = shell_app_get_windows (app);
++  for (iter = windows; iter; iter = iter->next)
++    {
++      MetaWindow *window = iter->data;
++      pid_t pid = meta_window_get_pid (window);
++
++      if (pid < 1)
++        continue;
++
++      /* Note in the (by far) common case, app will only have one pid, so
++       * we'll hit the first element, so don't worry about O(N^2) here.
++       */
++      if (!g_slist_find (result, GINT_TO_POINTER (pid)))
++        result = g_slist_prepend (result, GINT_TO_POINTER (pid));
++    }
++  return result;
++}
++
++void
++_shell_app_handle_startup_sequence (ShellApp            *app,
++                                    MetaStartupSequence *sequence)
++{
++  gboolean starting = !meta_startup_sequence_get_completed (sequence);
++
++  /* The Shell design calls for on application launch, the app title
++   * appears at top, and no X window is focused.  So when we get
++   * a startup-notification for this app, transition it to STARTING
++   * if it's currently stopped, set it as our application focus,
++   * but focus the no_focus window.
++   */
++  if (starting && shell_app_get_state (app) == SHELL_APP_STATE_STOPPED)
++    {
++      MetaDisplay *display = shell_global_get_display (shell_global_get ());
++
++      shell_app_state_transition (app, SHELL_APP_STATE_STARTING);
++      meta_display_unset_input_focus (display,
++                                      meta_startup_sequence_get_timestamp (sequence));
++    }
++
++  if (starting)
++    app->started_on_workspace = meta_startup_sequence_get_workspace (sequence);
++  else if (app->running_state && app->running_state->windows)
++    shell_app_state_transition (app, SHELL_APP_STATE_RUNNING);
++  else /* application have > 1 .desktop file */
++    shell_app_state_transition (app, SHELL_APP_STATE_STOPPED);
++}
++
++/**
++ * shell_app_request_quit:
++ * @app: A #ShellApp
++ *
++ * Initiate an asynchronous request to quit this application.
++ * The application may interact with the user, and the user
++ * might cancel the quit request from the application UI.
++ *
++ * This operation may not be supported for all applications.
++ *
++ * Returns: %TRUE if a quit request is supported for this application
++ */
++gboolean
++shell_app_request_quit (ShellApp   *app)
++{
++  GActionGroup *group = NULL;
++  GSList *iter;
++
++  if (shell_app_get_state (app) != SHELL_APP_STATE_RUNNING)
++    return FALSE;
++
++  /* First, check whether the app exports an explicit "quit" action
++   * that we can activate on the bus
++   */
++  group = G_ACTION_GROUP (app->running_state->muxer);
++
++  if (g_action_group_has_action (group, "app.quit") &&
++      g_action_group_get_action_parameter_type (group, "app.quit") == NULL)
++    {
++      g_action_group_activate_action (group, "app.quit", NULL);
++
++      return TRUE;
++    }
++
++  /* Otherwise, fall back to closing all the app's windows */
++  for (iter = app->running_state->windows; iter; iter = iter->next)
++    {
++      MetaWindow *win = iter->data;
++
++      if (!meta_window_can_close (win))
++        continue;
++
++      meta_window_delete (win, shell_global_get_current_time (shell_global_get ()));
++    }
++  return TRUE;
++}
++
++static void
++child_context_setup (gpointer user_data)
++{
++  ShellGlobal *shell_global = user_data;
++  MetaContext *meta_context = shell_global_get_context (shell_global);
++
++  meta_context_restore_rlimit_nofile (meta_context, NULL);
++}
++
++static void
++wait_pid (GDesktopAppInfo *appinfo,
++          GPid             pid,
++          gpointer         user_data)
++{
++  g_child_watch_add (pid, (GChildWatchFunc) g_spawn_close_pid, NULL);
++}
++
++static void
++apply_discrete_gpu_env (GAppLaunchContext *context,
++                        ShellGlobal       *global)
++{
++  GDBusProxy *proxy;
++  GVariant *variant;
++  guint num_children, i;
++  g_autoptr(GVariant) first_nondefault_discrete = NULL;
++  g_autoptr(GVariant) first_discrete = NULL;
++  g_autoptr(GVariant) first_nondefault = NULL;
++
++  proxy = shell_global_get_switcheroo_control (global);
++  if (!proxy)
++    {
++      g_warning ("Could not apply discrete GPU environment, switcheroo-control not available");
++      return;
++    }
++
++  variant = shell_net_hadess_switcheroo_control_get_gpus (SHELL_NET_HADESS_SWITCHEROO_CONTROL (proxy));
++  if (!variant)
++    {
++      g_warning ("Could not apply discrete GPU environment, no GPUs in list");
++      return;
++    }
++
++  num_children = g_variant_n_children (variant);
++  for (i = 0; i < num_children; i++)
++    {
++      g_autoptr(GVariant) gpu = NULL;
++      g_autoptr(GVariant) default_variant = NULL;
++      g_autoptr(GVariant) discrete_variant = NULL;
++      gboolean is_default = FALSE;
++      gboolean is_discrete = FALSE;
++
++      gpu = g_variant_get_child_value (variant, i);
++      if (!gpu ||
++          !g_variant_is_of_type (gpu, G_VARIANT_TYPE ("a{s*}")))
++        continue;
++
++      default_variant = g_variant_lookup_value (gpu, "Default", G_VARIANT_TYPE_BOOLEAN);
++      if (default_variant)
++        is_default = g_variant_get_boolean (default_variant);
++
++      discrete_variant = g_variant_lookup_value (gpu, "Discrete", G_VARIANT_TYPE_BOOLEAN);
++      if (discrete_variant)
++        is_discrete = g_variant_get_boolean (discrete_variant);
++
++      if (is_discrete)
++        {
++          if (first_nondefault_discrete == NULL && !is_default)
++            first_nondefault_discrete = g_variant_ref (gpu);
++
++          if (first_discrete == NULL)
++            first_discrete = g_variant_ref (gpu);
++        }
++
++      if (first_nondefault == NULL && !is_default)
++        first_nondefault = g_variant_ref (gpu);
++    }
++
++  GVariant *gpu_list[] = { first_nondefault_discrete, first_discrete, first_nondefault };
++
++  for (i = 0; i < G_N_ELEMENTS (gpu_list); ++i)
++    {
++      GVariant *gpu = gpu_list[i];
++      g_autoptr(GVariant) env = NULL;
++      g_autofree const char **env_s = NULL;
++      guint j;
++
++      if (!gpu)
++        continue;
++
++      env = g_variant_lookup_value (gpu, "Environment", NULL);
++      if (!env)
++        continue;
++
++      env_s = g_variant_get_strv (env, NULL);
++      for (j = 0; env_s[j] != NULL && env_s[j+1] != NULL; j = j + 2)
++        g_app_launch_context_setenv (context, env_s[j], env_s[j+1]);
++      return;
++    }
++
++  g_debug ("Could not find discrete GPU in switcheroo-control, not applying environment");
++}
++
++/**
++ * shell_app_launch:
++ * @timestamp: Event timestamp, or 0 for current event timestamp
++ * @workspace: Start on this workspace, or -1 for default
++ * @gpu_pref: the GPU to prefer launching on
++ * @error: A #GError
++ */
++gboolean
++shell_app_launch (ShellApp           *app,
++                  guint               timestamp,
++                  int                 workspace,
++                  ShellAppLaunchGpu   gpu_pref,
++                  GError            **error)
++{
++  ShellGlobal *global;
++  GAppLaunchContext *context;
++  gboolean ret;
++  GSpawnFlags flags;
++  gboolean discrete_gpu = FALSE;
++  ShellGlobal *shell_global = shell_global_get ();
++
++  if (app->info == NULL)
++    {
++      MetaWindow *window = window_backed_app_get_window (app);
++      /* We don't use an error return if there no longer any windows, because the
++       * user attempting to activate a stale window backed app isn't something
++       * we would expect the caller to meaningfully handle or display an error
++       * message to the user.
++       */
++      if (window)
++        meta_window_activate (window, timestamp);
++      return TRUE;
++    }
++
++  global = shell_global_get ();
++  context = shell_global_create_app_launch_context (global, timestamp, workspace);
++  if (gpu_pref == SHELL_APP_LAUNCH_GPU_APP_PREF)
++    discrete_gpu = g_desktop_app_info_get_boolean (app->info, "PrefersNonDefaultGPU");
++  else
++    discrete_gpu = (gpu_pref == SHELL_APP_LAUNCH_GPU_DISCRETE);
++
++  if (discrete_gpu)
++    apply_discrete_gpu_env (context, global);
++
++  /* Set LEAVE_DESCRIPTORS_OPEN in order to use an optimized gspawn
++   * codepath. The shell's open file descriptors should be marked CLOEXEC
++   * so that they are automatically closed even with this flag set.
++   */
++  flags = G_SPAWN_SEARCH_PATH | G_SPAWN_DO_NOT_REAP_CHILD |
++          G_SPAWN_LEAVE_DESCRIPTORS_OPEN;
++
++  /* Optimized spawn path, avoiding a child_setup function */
++  {
++    g_autofd int journalfd = -1;
++
++    journalfd = sd_journal_stream_fd (shell_app_get_id (app), LOG_INFO, FALSE);
++
++    ret = g_desktop_app_info_launch_uris_as_manager_with_fds (app->info, NULL,
++                                                              context,
++                                                              flags,
++                                                              child_context_setup, shell_global,
++                                                              wait_pid, NULL,
++                                                              -1,
++                                                              journalfd,
++                                                              journalfd,
++                                                              error);
++  }
++  g_object_unref (context);
++
++  return ret;
++}
++
++/**
++ * shell_app_launch_action:
++ * @app: the #ShellApp
++ * @action_name: the name of the action to launch (as obtained by
++ *               g_desktop_app_info_list_actions())
++ * @timestamp: Event timestamp, or 0 for current event timestamp
++ * @workspace: Start on this workspace, or -1 for default
++ */
++void
++shell_app_launch_action (ShellApp        *app,
++                         const char      *action_name,
++                         guint            timestamp,
++                         int              workspace)
++{
++  ShellGlobal *global;
++  GAppLaunchContext *context;
++
++  global = shell_global_get ();
++  context = shell_global_create_app_launch_context (global, timestamp, workspace);
++
++  g_desktop_app_info_launch_action (G_DESKTOP_APP_INFO (app->info),
++                                    action_name, context);
++
++  g_object_unref (context);
++}
++
++static gchar *
++object_path_from_app_id (const gchar *app_id)
++{
++  gchar *app_id_path, *iter;
++
++  app_id_path = g_strconcat ("/", app_id, NULL);
++  for (iter = app_id_path; *iter; iter++)
++    {
++      if (*iter == '.')
++        *iter = '/';
++
++      if (*iter == '-')
++        *iter = '_';
++    }
++
++  return app_id_path;
++}
++
++static void
++on_activate_action_cb (GObject      *source,
++                       GAsyncResult *res,
++                       gpointer      user_data)
++{
++  g_autoptr (GTask) task = G_TASK (user_data);
++  g_autoptr (GVariant) value = NULL;
++  g_autoptr (GError) error = NULL;
++
++  value = g_dbus_connection_call_finish (G_DBUS_CONNECTION (source),
++                                         res, &error);
++
++  if (error)
++      g_task_return_error (task, g_steal_pointer (&error));
++  else
++      g_task_return_boolean (task, TRUE);
++}
++
++static void
++activate_action_get_bus_cb (GObject      *object,
++                            GAsyncResult *result,
++                            gpointer      user_data)
++{
++  g_autoptr (GTask) task = G_TASK (user_data);
++  ShellApp *app = NULL;
++  g_autoptr (GDBusConnection) session_bus = NULL;
++  g_autoptr (GError) error = NULL;
++  g_autofree gchar *object_path = NULL;
++  g_autofree gchar *app_id = NULL;
++  GVariant *task_data = NULL;
++  GCancellable *cancellable = NULL;
++  gchar *last_dot;
++
++  session_bus = g_bus_get_finish (result, &error);
++
++  if (error)
++    {
++      g_task_return_error (task, g_steal_pointer (&error));
++      return;
++    }
++
++  app = SHELL_APP (g_task_get_source_object (task));
++
++  app_id = g_strdup (g_app_info_get_id (G_APP_INFO (app->info)));
++  last_dot = strrchr (app_id, '.');
++  if (last_dot && g_str_equal (last_dot, ".desktop"))
++      *last_dot = '\0';
++
++  object_path = object_path_from_app_id (app_id);
++  task_data = g_task_get_task_data (task);
++  cancellable = g_task_get_cancellable (task);
++
++  g_dbus_connection_call (session_bus,
++                          app_id, object_path,
++                          "org.freedesktop.Application", "ActivateAction",
++                          task_data,
++                          NULL, G_DBUS_CALL_FLAGS_NONE, -1,
++                          cancellable,
++                          on_activate_action_cb, g_steal_pointer (&task));
++}
++
++
++/**
++ * shell_app_activate_action
++ * @app: the #ShellApp
++ * @action_name: the name of an action to activate
++ * @parameter: (nullable): the parameter to the activation
++ * @timestamp: Event timestamp, or 0 for current event timestamp
++ * @workspace: Start on this workspace, or -1 for default
++ * @cancellable: (nullable): a #GCancellable or %NULL
++ * @callback: (scope async): A #GAsyncReadyCallback to call when the request is satisfied.
++ * @user_data: (nullable): User data to pass to @callback
++ *
++ * This activates an action using 'org.freedesktop.Application' DBus interface.
++ *
++ * This function will fail if this #ShellApp doesn't have a valid #GDesktopAppInfo
++ * with a valid id.
++ */
++void
++shell_app_activate_action (ShellApp            *app,
++                           const char          *action_name,
++                           GVariant            *parameter,
++                           guint                timestamp,
++                           int                  workspace,
++                           GCancellable        *cancellable,
++                           GAsyncReadyCallback  callback,
++                           gpointer             user_data)
++{
++  g_autoptr (GTask) task = NULL;
++  g_autoptr (GVariant) task_data = NULL;
++
++  g_return_if_fail (SHELL_IS_APP (app));
++  g_return_if_fail (G_IS_DESKTOP_APP_INFO (app->info));
++  g_return_if_fail (g_application_id_is_valid (g_app_info_get_id (G_APP_INFO (app->info))));
++  g_return_if_fail (action_name != NULL && action_name[0] != '\0');
++  g_return_if_fail (parameter == NULL || g_variant_is_of_type (parameter,  G_VARIANT_TYPE ("av")));
++  g_return_if_fail (timestamp >= 0);
++  g_return_if_fail (workspace >= -1);
++  g_return_if_fail (cancellable == NULL || G_IS_CANCELLABLE (cancellable));
++
++  task = g_task_new (app, cancellable, callback, user_data);
++  g_task_set_source_tag (task, shell_app_activate_action);
++
++  if (!parameter)
++    parameter = g_variant_new("av", NULL);
++
++  task_data = g_variant_ref_sink (g_variant_new ("(s@av@a{sv})", action_name, parameter,
++                                                 get_platform_data (app, timestamp, workspace)));
++
++  g_task_set_task_data (task, g_steal_pointer (&task_data), (GDestroyNotify) g_variant_unref);
++
++  g_bus_get (G_BUS_TYPE_SESSION, cancellable, activate_action_get_bus_cb, g_steal_pointer (&task));
++}
++
++/**
++ * shell_app_activate_action_finish:
++ * @app: the #ShellApp
++ * @error: #GError for error reporting
++ *
++ * Finish the asynchronous operation started by shell_app_activate_action()
++ * and obtain its result.
++ *
++ * Returns: whether the operation was successful
++ *
++ */
++gboolean
++shell_app_activate_action_finish (ShellApp      *app,
++                                  GAsyncResult  *result,
++                                  GError       **error)
++{
++  g_return_val_if_fail (SHELL_IS_APP (app), FALSE);
++  g_return_val_if_fail (G_IS_TASK (result), FALSE);
++  g_return_val_if_fail (g_async_result_is_tagged (result,
++                                                  shell_app_activate_action),
++                        FALSE);
++
++  if (!g_task_propagate_boolean (G_TASK (result), error))
++    return FALSE;
++
++  return TRUE;
++}
++
++/**
++ * shell_app_get_app_info:
++ * @app: a #ShellApp
++ *
++ * Returns: (transfer none): The #GDesktopAppInfo for this app, or %NULL if backed by a window
++ */
++GDesktopAppInfo *
++shell_app_get_app_info (ShellApp *app)
++{
++  return app->info;
++}
++
++static void
++create_running_state (ShellApp *app)
++{
++  MetaDisplay *display = shell_global_get_display (shell_global_get ());
++  MetaWorkspaceManager *workspace_manager =
++    meta_display_get_workspace_manager (display);
++
++  g_assert (app->running_state == NULL);
++
++  app->running_state = g_new0 (ShellAppRunningState, 1);
++  app->running_state->refcount = 1;
++  app->running_state->workspace_switch_id =
++    g_signal_connect (workspace_manager, "workspace-switched",
++                      G_CALLBACK (shell_app_on_ws_switch), app);
++
++  app->running_state->session = g_bus_get_sync (G_BUS_TYPE_SESSION, NULL, NULL);
++  g_assert (app->running_state->session != NULL);
++  app->running_state->muxer = gtk_action_muxer_new ();
++}
++
++void
++shell_app_update_app_actions (ShellApp   *app,
++                              MetaWindow *window)
++{
++  const gchar *unique_bus_name;
++
++  /* We assume that 'gtk-application-object-path' and
++   * 'gtk-app-menu-object-path' are the same for all windows which
++   * have it set.
++   *
++   * It could be possible, however, that the first window we see
++   * belonging to the app didn't have them set.  For this reason, we
++   * take the values from the first window that has them set and ignore
++   * all the rest (until the app is stopped and restarted).
++   */
++
++  unique_bus_name = meta_window_get_gtk_unique_bus_name (window);
++
++  if (g_strcmp0 (app->running_state->unique_bus_name, unique_bus_name) != 0)
++    {
++      const gchar *application_object_path;
++      GDBusActionGroup *actions;
++
++      application_object_path = meta_window_get_gtk_application_object_path (window);
++
++      if (application_object_path == NULL || unique_bus_name == NULL)
++        return;
++
++      g_set_str (&app->running_state->unique_bus_name, unique_bus_name);
++      actions = g_dbus_action_group_get (app->running_state->session, unique_bus_name, application_object_path);
++      gtk_action_muxer_insert (app->running_state->muxer, "app", G_ACTION_GROUP (actions));
++      g_object_unref (actions);
++    }
++}
++
++static void
++unref_running_state (ShellAppRunningState *state)
++{
++  MetaDisplay *display = shell_global_get_display (shell_global_get ());
++  MetaWorkspaceManager *workspace_manager =
++    meta_display_get_workspace_manager (display);
++
++  g_assert (state->refcount > 0);
++
++  state->refcount--;
++  if (state->refcount > 0)
++    return;
++
++  g_clear_signal_handler (&state->workspace_switch_id, workspace_manager);
++
++  g_clear_object (&state->application_proxy);
++
++  if (state->cancellable != NULL)
++    {
++      g_cancellable_cancel (state->cancellable);
++      g_clear_object (&state->cancellable);
++    }
++
++  g_clear_object (&state->muxer);
++  g_clear_object (&state->session);
++  g_clear_pointer (&state->unique_bus_name, g_free);
++
++  g_free (state);
++}
++
++/**
++ * shell_app_compare_by_name:
++ * @app: One app
++ * @other: The other app
++ *
++ * Order two applications by name.
++ *
++ * Returns: -1, 0, or 1; suitable for use as a comparison function
++ * for e.g. g_slist_sort()
++ */
++int
++shell_app_compare_by_name (ShellApp *app, ShellApp *other)
++{
++  return strcmp (app->name_collation_key, other->name_collation_key);
++}
++
++static void
++shell_app_init (ShellApp *self)
++{
++  self->state = SHELL_APP_STATE_STOPPED;
++  self->started_on_workspace = -1;
++}
++
++static void
++shell_app_dispose (GObject *object)
++{
++  ShellApp *app = SHELL_APP (object);
++
++  g_clear_object (&app->info);
++  g_clear_object (&app->fallback_icon);
++
++  while (app->running_state)
++    _shell_app_remove_window (app, app->running_state->windows->data);
++
++  /* We should have been transitioned when we removed all of our windows */
++  g_assert (app->state == SHELL_APP_STATE_STOPPED);
++  g_assert (app->running_state == NULL);
++
++  G_OBJECT_CLASS(shell_app_parent_class)->dispose (object);
++}
++
++static void
++shell_app_finalize (GObject *object)
++{
++  ShellApp *app = SHELL_APP (object);
++
++  g_free (app->window_id_string);
++
++  g_free (app->name_collation_key);
++
++  G_OBJECT_CLASS(shell_app_parent_class)->finalize (object);
++}
++
++static void
++shell_app_class_init(ShellAppClass *klass)
++{
++  GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
++
++  gobject_class->get_property = shell_app_get_property;
++  gobject_class->set_property = shell_app_set_property;
++  gobject_class->dispose = shell_app_dispose;
++  gobject_class->finalize = shell_app_finalize;
++
++  shell_app_signals[WINDOWS_CHANGED] = g_signal_new ("windows-changed",
++                                     SHELL_TYPE_APP,
++                                     G_SIGNAL_RUN_LAST,
++                                     0,
++                                     NULL, NULL, NULL,
++                                     G_TYPE_NONE, 0);
++
++  /**
++   * ShellApp:state:
++   *
++   * The high-level state of the application, effectively whether it's
++   * running or not, or transitioning between those states.
++   */
++  props[PROP_STATE] =
++    g_param_spec_enum ("state", NULL, NULL,
++                       SHELL_TYPE_APP_STATE,
++                       SHELL_APP_STATE_STOPPED,
++                       G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
++
++  /**
++   * ShellApp:busy:
++   *
++   * Whether the application has marked itself as busy.
++   */
++  props[PROP_BUSY] =
++    g_param_spec_boolean ("busy", NULL, NULL,
++                          FALSE,
++                          G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
++
++  /**
++   * ShellApp:id:
++   *
++   * The id of this application (a desktop filename, or a special string
++   * like window:0xabcd1234)
++   */
++  props[PROP_ID] =
++    g_param_spec_string ("id", NULL, NULL,
++                         NULL,
++                         G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
++
++  /**
++   * ShellApp:icon:
++   *
++   * The #GIcon representing this ShellApp
++   */
++  props[PROP_ICON] =
++    g_param_spec_object ("icon", NULL, NULL,
++                         G_TYPE_ICON,
++                         G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
++
++  /**
++   * ShellApp:action-group:
++   *
++   * The #GDBusActionGroup associated with this ShellApp, if any. See the
++   * documentation of #GApplication and #GActionGroup for details.
++   */
++  props[PROP_ACTION_GROUP] =
++    g_param_spec_object ("action-group", NULL, NULL,
++                         G_TYPE_ACTION_GROUP,
++                         G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
++
++  /**
++   * ShellApp:app-info:
++   *
++   * The #GDesktopAppInfo associated with this ShellApp, if any.
++   */
++  props[PROP_APP_INFO] =
++    g_param_spec_object ("app-info", NULL, NULL,
++                         G_TYPE_DESKTOP_APP_INFO,
++                         G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS);
++
++  g_object_class_install_properties (gobject_class, N_PROPS, props);
++}
+diff --git a/src/shell-global.c b/src/shell-global.c
+index eb162669b3d08a247642420949d619f1c2a014ab..dc798512ee1429060a2b13cee058d18a8076ceee 100644
+--- a/src/shell-global.c
++++ b/src/shell-global.c
+@@ -1201,6 +1201,90 @@ shell_global_app_launched_cb (GAppLaunchContext *context,
+                              NULL, NULL, NULL);
+ }
+ 
++/* Shared native-client profile. This runs after compositor environment
++ * sanitization; it never changes Shell's own HWC environment. D-Bus activation
++ * consumes the same file via santos-client-environment at session startup.
++ */
++static void
++santos_apply_client_profile (GAppLaunchContext *context)
++{
++  static const char * const variables[] = {
++    "GDK_BACKEND", "GSK_RENDERER", "GDK_DISABLE", "LD_LIBRARY_PATH", "LD_PRELOAD",
++    "LIBEGL", "LIBGLESV2", "HYBRIS_ANDROID_SDK_VERSION", "HYBRIS_LINKER_DIR",
++    "HYBRIS_EGLPLATFORM", "HYBRIS_EGLPLATFORM_DIR", "EGL_PLATFORM",
++    "SANTOS_EGL_PLATFORM", "ANDROID_ROOT", "ANDROID_DATA", "LD_SHIM_LIBS",
++  };
++  g_autoptr (GKeyFile) profile = g_key_file_new ();
++  g_autoptr (GError) error = NULL;
++  g_autofree char *platform = NULL;
++  guint i;
++
++  if (!g_key_file_load_from_file (profile, "/etc/santos/gtk4-client.ini",
++                                  G_KEY_FILE_NONE, &error))
++    {
++      if (!g_error_matches (error, G_FILE_ERROR, G_FILE_ERROR_NOENT))
++        g_warning ("Cannot read Santos client profile: %s", error->message);
++      return;
++    }
++  if (!g_key_file_get_boolean (profile, "Profile", "Enabled", NULL))
++    return;
++
++  platform = g_key_file_get_string (profile, "Environment", "HYBRIS_EGLPLATFORM", NULL);
++  if (g_strcmp0 (platform, "wayland") != 0)
++    {
++      g_warning ("Santos client profile must select Wayland, not compositor HWC");
++      return;
++    }
++
++  for (i = 0; i < G_N_ELEMENTS (variables); i++)
++    {
++      g_autofree char *value =
++        g_key_file_get_string (profile, "Environment", variables[i], NULL);
++      if (value)
++        g_app_launch_context_setenv (context, variables[i], value);
++    }
++}
++
++static void
++santos_sanitize_app_launch_context (GAppLaunchContext *context)
++{
++  static const char * const compositor_private_vars[] = {
++    /* Compositor-private preloads and library paths */
++    "LD_PRELOAD",
++    "LD_LIBRARY_PATH",
++
++    /* Compositor vendor EGL/GLES provider selection */
++    "LIBEGL",
++    "LIBGLESV2",
++    "EGL_PLATFORM",
++    "HYBRIS_EGLPLATFORM",
++    "HYBRIS_EGLPLATFORM_DIR",
++    "HYBRIS_LINKER_DIR",
++    "HYBRIS_ANDROID_SDK_VERSION",
++    "LD_SHIM_LIBS",
++    "SANTOS_EGL_PLATFORM",
++
++    /* Compositor-only GIR / schema / data / debug variables */
++    "GI_TYPELIB_PATH",
++    "GNOME_SHELL_DATADIR",
++    "GSETTINGS_SCHEMA_DIR",
++    "ICU_DATA",
++    "COGL_DEBUG",
++    "STATE_DIR",
++    "SHELL_BIN",
++    "ANDROID_DATA",
++    "ANDROID_ROOT",
++  };
++  guint i;
++
++  for (i = 0; i < G_N_ELEMENTS (compositor_private_vars); i++)
++    g_app_launch_context_unsetenv (context, compositor_private_vars[i]);
++
++  /* Set clean product application XDG_DATA_DIRS without private bundle prefix */
++  g_app_launch_context_setenv (context, "XDG_DATA_DIRS", "/usr/local/share:/usr/share");
++  santos_apply_client_profile (context);
++}
++
+ /**
+  * shell_global_create_app_launch_context:
+  * @global: A #ShellGlobal
+@@ -1240,6 +1324,8 @@ shell_global_create_app_launch_context (ShellGlobal *global,
+                     G_CALLBACK (shell_global_app_launched_cb),
+                     NULL);
+ 
++  santos_sanitize_app_launch_context ((GAppLaunchContext *) context);
++
+   return (GAppLaunchContext *) context;
+ }
+ 
+diff --git a/src/shell-global.c.orig b/src/shell-global.c.orig
+new file mode 100644
+index 0000000000000000000000000000000000000000..eb162669b3d08a247642420949d619f1c2a014ab
+--- /dev/null
++++ b/src/shell-global.c.orig
+@@ -0,0 +1,1760 @@
++/* -*- mode: C; c-file-style: "gnu"; indent-tabs-mode: nil; -*- */
++
++#include "config.h"
++
++#include <dirent.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <math.h>
++#include <stdarg.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#ifdef HAVE_SYS_RESOURCE_H
++#include <sys/resource.h>
++#endif
++#include <locale.h>
++
++#include <gio/gio.h>
++#include <girepository/girepository.h>
++#include <meta/meta-backend.h>
++#include <meta/meta-context.h>
++#include <meta/display.h>
++#include <meta/util.h>
++#include <meta/meta-shaped-texture.h>
++#include <meta/meta-cursor-tracker.h>
++#include <meta/meta-settings.h>
++#include <meta/meta-workspace-manager.h>
++#include <mtk/mtk.h>
++
++#ifdef HAVE_XWAYLAND
++#include <meta/meta-x11-display.h>
++#endif
++
++#define GNOME_DESKTOP_USE_UNSTABLE_API
++#include <libgnome-desktop/gnome-systemd.h>
++
++#if defined __OpenBSD__ || defined __FreeBSD__
++#include <sys/sysctl.h>
++#endif
++
++#include "shell-enum-types.h"
++#include "shell-global-private.h"
++#include "shell-perf-log.h"
++#include "shell-window-tracker.h"
++#include "shell-app-usage.h"
++#include "shell-app-cache-private.h"
++#include "shell-util.h"
++#include "switcheroo-control.h"
++
++static ShellGlobal *the_object = NULL;
++
++struct _ShellGlobal {
++  GObject parent;
++
++  ClutterStage *stage;
++
++  MetaBackend *backend;
++  MetaContext *meta_context;
++  MetaDisplay *meta_display;
++  MetaCompositor *compositor;
++  MetaWorkspaceManager *workspace_manager;
++
++  char *session_mode;
++
++  GjsContext *js_context;
++  MetaPlugin *plugin;
++  ShellWM *wm;
++  GSettings *settings;
++  const char *datadir;
++  char *imagedir;
++  char *userdatadir;
++  GFile *userdatadir_path;
++  GFile *runtime_state_path;
++  GFile *automation_script;
++
++  ShellWindowTracker *window_tracker;
++  ShellAppSystem *app_system;
++  ShellAppCache *app_cache;
++  ShellAppUsage *app_usage;
++
++  StFocusManager *focus_manager;
++
++  guint work_count;
++  GSList *leisure_closures;
++  guint leisure_function_id;
++
++  GHashTable *save_ops;
++
++  gboolean frame_timestamps;
++  gboolean frame_finish_timestamp;
++
++  guint before_paint_id;
++  guint after_swap_id;
++
++  GDBusProxy *switcheroo_control;
++  GCancellable *switcheroo_cancellable;
++
++  gboolean force_animations;
++};
++
++enum {
++  PROP_0,
++
++  PROP_SESSION_MODE,
++  PROP_BACKEND,
++  PROP_CONTEXT,
++  PROP_DISPLAY,
++  PROP_COMPOSITOR,
++  PROP_WORKSPACE_MANAGER,
++  PROP_SCREEN_WIDTH,
++  PROP_SCREEN_HEIGHT,
++  PROP_STAGE,
++  PROP_WINDOW_GROUP,
++  PROP_TOP_WINDOW_GROUP,
++  PROP_WINDOW_MANAGER,
++  PROP_SETTINGS,
++  PROP_DATADIR,
++  PROP_USERDATADIR,
++  PROP_FOCUS_MANAGER,
++  PROP_FRAME_TIMESTAMPS,
++  PROP_FRAME_FINISH_TIMESTAMP,
++  PROP_SWITCHEROO_CONTROL,
++  PROP_FORCE_ANIMATIONS,
++  PROP_AUTOMATION_SCRIPT,
++
++  N_PROPS
++};
++
++static GParamSpec *props[N_PROPS] = { NULL, };
++
++/* Signals */
++enum
++{
++ NOTIFY_ERROR,
++ LOCATE_POINTER,
++ SHUTDOWN,
++ LAST_SIGNAL
++};
++
++G_DEFINE_TYPE(ShellGlobal, shell_global, G_TYPE_OBJECT);
++
++static guint shell_global_signals [LAST_SIGNAL] = { 0 };
++
++static void
++got_switcheroo_control_gpus_property_cb (GObject      *source_object,
++                                         GAsyncResult *res,
++                                         gpointer      user_data)
++{
++  ShellGlobal *global;
++  g_autoptr (GError) error = NULL;
++  g_autoptr (GVariant) gpus = NULL;
++
++  gpus = g_dbus_connection_call_finish (G_DBUS_CONNECTION (source_object),
++                                        res, &error);
++  if (!gpus)
++    {
++      if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
++        g_debug ("Could not get GPUs property from switcheroo-control: %s", error->message);
++      return;
++    }
++
++  global = user_data;
++  g_dbus_proxy_set_cached_property (global->switcheroo_control, "GPUs", gpus);
++  g_object_notify_by_pspec (G_OBJECT (global), props[PROP_SWITCHEROO_CONTROL]);
++}
++
++static void
++switcheroo_control_ready_cb (GObject      *source_object,
++                             GAsyncResult *res,
++                             gpointer      user_data)
++{
++  ShellGlobal *global;
++  g_autoptr (GError) error = NULL;
++  ShellNetHadessSwitcherooControl *control;
++  g_auto (GStrv) cached_props = NULL;
++
++  control = shell_net_hadess_switcheroo_control_proxy_new_for_bus_finish (res, &error);
++  if (!control)
++    {
++      if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
++        g_debug ("Could not get switcheroo-control GDBusProxy: %s", error->message);
++      return;
++    }
++
++  global = user_data;
++  global->switcheroo_control = G_DBUS_PROXY (control);
++  g_debug ("Got switcheroo-control proxy successfully");
++
++  cached_props = g_dbus_proxy_get_cached_property_names (global->switcheroo_control);
++  if (cached_props != NULL && g_strv_contains ((const gchar * const *) cached_props, "GPUs"))
++    {
++      g_object_notify_by_pspec (G_OBJECT (global), props[PROP_SWITCHEROO_CONTROL]);
++      return;
++    }
++  /* Delay property notification until we have all the properties gathered */
++
++  g_dbus_connection_call (g_dbus_proxy_get_connection (global->switcheroo_control),
++                          g_dbus_proxy_get_name (global->switcheroo_control),
++                          g_dbus_proxy_get_object_path (global->switcheroo_control),
++                          "org.freedesktop.DBus.Properties",
++                          "Get",
++                          g_variant_new ("(ss)",
++                                         g_dbus_proxy_get_interface_name (global->switcheroo_control),
++                                         "GPUs"),
++                          NULL,
++                          G_DBUS_CALL_FLAGS_NONE,
++                          -1,
++                          global->switcheroo_cancellable,
++                          got_switcheroo_control_gpus_property_cb,
++                          user_data);
++}
++
++static void
++shell_global_set_property(GObject         *object,
++                          guint            prop_id,
++                          const GValue    *value,
++                          GParamSpec      *pspec)
++{
++  ShellGlobal *global = SHELL_GLOBAL (object);
++
++  switch (prop_id)
++    {
++    case PROP_SESSION_MODE:
++      g_clear_pointer (&global->session_mode, g_free);
++      global->session_mode = g_ascii_strdown (g_value_get_string (value), -1);
++      break;
++    case PROP_FRAME_TIMESTAMPS:
++      shell_global_set_frame_timestamps (global, g_value_get_boolean (value));
++      break;
++    case PROP_FRAME_FINISH_TIMESTAMP:
++      shell_global_set_frame_finish_timestamp (global, g_value_get_boolean (value));
++      break;
++    case PROP_FORCE_ANIMATIONS:
++      shell_global_set_force_animations (global, g_value_get_boolean (value));
++      break;
++    case PROP_AUTOMATION_SCRIPT:
++      g_set_object (&global->automation_script, g_value_get_object (value));
++      break;
++    default:
++      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
++      break;
++    }
++}
++
++static void
++shell_global_get_property(GObject         *object,
++                          guint            prop_id,
++                          GValue          *value,
++                          GParamSpec      *pspec)
++{
++  ShellGlobal *global = SHELL_GLOBAL (object);
++
++  switch (prop_id)
++    {
++    case PROP_SESSION_MODE:
++      g_value_set_string (value, shell_global_get_session_mode (global));
++      break;
++    case PROP_BACKEND:
++      g_value_set_object (value, global->backend);
++      break;
++    case PROP_CONTEXT:
++      g_value_set_object (value, global->meta_context);
++      break;
++    case PROP_DISPLAY:
++      g_value_set_object (value, global->meta_display);
++      break;
++    case PROP_COMPOSITOR:
++      g_value_set_object (value, global->compositor);
++      break;
++    case PROP_WORKSPACE_MANAGER:
++      g_value_set_object (value, global->workspace_manager);
++      break;
++    case PROP_SCREEN_WIDTH:
++      g_value_set_int (value, shell_global_get_screen_width (global));
++      break;
++      break;
++    case PROP_SCREEN_HEIGHT:
++      g_value_set_int (value, shell_global_get_screen_height (global));
++      break;
++    case PROP_STAGE:
++      g_value_set_object (value, global->stage);
++      break;
++    case PROP_WINDOW_GROUP:
++      g_value_set_object (value, meta_compositor_get_window_group (global->compositor));
++      break;
++    case PROP_TOP_WINDOW_GROUP:
++      g_value_set_object (value, meta_compositor_get_top_window_group (global->compositor));
++      break;
++    case PROP_WINDOW_MANAGER:
++      g_value_set_object (value, global->wm);
++      break;
++    case PROP_SETTINGS:
++      g_value_set_object (value, global->settings);
++      break;
++    case PROP_DATADIR:
++      g_value_set_string (value, global->datadir);
++      break;
++    case PROP_USERDATADIR:
++      g_value_set_string (value, global->userdatadir);
++      break;
++    case PROP_FOCUS_MANAGER:
++      g_value_set_object (value, global->focus_manager);
++      break;
++    case PROP_FRAME_TIMESTAMPS:
++      g_value_set_boolean (value, global->frame_timestamps);
++      break;
++    case PROP_FRAME_FINISH_TIMESTAMP:
++      g_value_set_boolean (value, global->frame_finish_timestamp);
++      break;
++    case PROP_SWITCHEROO_CONTROL:
++      g_value_set_object (value, global->switcheroo_control);
++      break;
++    case PROP_FORCE_ANIMATIONS:
++      g_value_set_boolean (value, global->force_animations);
++      break;
++    case PROP_AUTOMATION_SCRIPT:
++      g_value_set_object (value, global->automation_script);
++      break;
++    default:
++      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
++      break;
++    }
++}
++
++static void
++switcheroo_appeared_cb (GDBusConnection *connection,
++                        const char     *name,
++                        const char     *name_owner,
++                        gpointer        user_data)
++{
++  ShellGlobal *global = user_data;
++
++  g_debug ("switcheroo-control appeared");
++  shell_net_hadess_switcheroo_control_proxy_new_for_bus (G_BUS_TYPE_SYSTEM,
++                                                         G_DBUS_PROXY_FLAGS_NONE,
++                                                         "net.hadess.SwitcherooControl",
++                                                         "/net/hadess/SwitcherooControl",
++                                                         global->switcheroo_cancellable,
++                                                         switcheroo_control_ready_cb,
++                                                         global);
++}
++
++static void
++switcheroo_vanished_cb (GDBusConnection *connection,
++                        const char      *name,
++                        gpointer         user_data)
++{
++  ShellGlobal *global = user_data;
++
++  g_debug ("switcheroo-control vanished");
++  g_clear_object (&global->switcheroo_control);
++  g_object_notify_by_pspec (G_OBJECT (global), props[PROP_SWITCHEROO_CONTROL]);
++}
++
++static void
++shell_global_init (ShellGlobal *global)
++{
++  const char *datadir = g_getenv ("GNOME_SHELL_DATADIR");
++  const char *shell_js = g_getenv("GNOME_SHELL_JS");
++  g_autofree char *imagedir = NULL;
++  g_auto (GStrv) search_path = NULL;
++  g_autofree char *path = NULL;
++  const char *byteorder_string;
++
++  if (!datadir)
++    datadir = GNOME_SHELL_DATADIR;
++  global->datadir = datadir;
++
++  /* We make sure imagedir ends with a '/', since the JS won't have
++   * access to g_build_filename() and so will end up just
++   * concatenating global.imagedir to a filename.
++   */
++  imagedir = g_build_filename (datadir, "images/", NULL);
++  if (g_file_test (imagedir, G_FILE_TEST_IS_DIR))
++    global->imagedir = g_steal_pointer (&imagedir);
++  else
++    global->imagedir = g_strdup_printf ("%s/", datadir);
++
++  /* Ensure config dir exists for later use */
++  global->userdatadir = g_build_filename (g_get_user_data_dir (), "gnome-shell", NULL);
++  g_mkdir_with_parents (global->userdatadir, 0700);
++  global->userdatadir_path = g_file_new_for_path (global->userdatadir);
++
++#if G_BYTE_ORDER == G_LITTLE_ENDIAN
++  byteorder_string = "LE";
++#else
++  byteorder_string = "BE";
++#endif
++
++  /* And the runtime state */
++  path = g_strdup_printf ("%s/gnome-shell/runtime-state-%s.%s",
++                          g_get_user_runtime_dir (),
++                          byteorder_string,
++                          g_getenv ("DISPLAY"));
++  (void) g_mkdir_with_parents (path, 0700);
++  global->runtime_state_path = g_file_new_for_path (path);
++
++  global->settings = g_settings_new ("org.gnome.shell");
++
++  if (shell_js)
++    {
++      int i, j;
++      search_path = g_strsplit (shell_js, ":", -1);
++
++      /* The naive g_strsplit above will split 'resource:///foo/bar' into 'resource',
++       * '///foo/bar'. Combine these back together by looking for a literal 'resource'
++       * in the array. */
++      for (i = 0, j = 0; search_path[i];)
++        {
++          char *out;
++
++          if (strcmp (search_path[i], "resource") == 0 && search_path[i + 1] != NULL)
++            {
++              out = g_strconcat (search_path[i], ":", search_path[i + 1], NULL);
++              g_free (search_path[i]);
++              g_free (search_path[i + 1]);
++              i += 2;
++            }
++          else
++            {
++              out = search_path[i];
++              i += 1;
++            }
++
++          search_path[j++] = out;
++        }
++
++      search_path[j] = NULL; /* NULL-terminate the now possibly shorter array */
++    }
++  else
++    {
++      search_path = g_malloc0 (2 * sizeof (char *));
++      search_path[0] = g_strdup ("resource:///org/gnome/shell");
++    }
++
++  global->js_context = g_object_new (GJS_TYPE_CONTEXT,
++                                     "search-path", search_path,
++                                     NULL);
++
++  global->save_ops = g_hash_table_new_full (g_file_hash,
++                                            (GEqualFunc) g_file_equal,
++                                            g_object_unref, g_object_unref);
++
++  global->switcheroo_cancellable = g_cancellable_new ();
++  g_bus_watch_name (G_BUS_TYPE_SYSTEM,
++                    "net.hadess.SwitcherooControl",
++                    G_BUS_NAME_WATCHER_FLAGS_NONE,
++                    switcheroo_appeared_cb,
++                    switcheroo_vanished_cb,
++                    global,
++                    NULL);
++}
++
++static void
++shell_global_finalize (GObject *object)
++{
++  ShellGlobal *global = SHELL_GLOBAL (object);
++
++  g_clear_object (&global->js_context);
++  g_object_unref (global->settings);
++
++  g_clear_object (&global->window_tracker);
++  g_clear_object (&global->app_system);
++  g_clear_object (&global->app_cache);
++  g_clear_object (&global->app_usage);
++  g_clear_object (&global->wm);
++
++  g_clear_handle_id (&global->before_paint_id,
++                     clutter_threads_remove_repaint_func);
++  g_clear_handle_id (&global->after_swap_id,
++                     clutter_threads_remove_repaint_func);
++
++  the_object = NULL;
++
++  g_cancellable_cancel (global->switcheroo_cancellable);
++  g_clear_object (&global->switcheroo_cancellable);
++
++  g_clear_object (&global->userdatadir_path);
++  g_clear_object (&global->runtime_state_path);
++
++  g_free (global->session_mode);
++  g_free (global->imagedir);
++  g_free (global->userdatadir);
++
++  g_hash_table_unref (global->save_ops);
++
++  G_OBJECT_CLASS(shell_global_parent_class)->finalize (object);
++}
++
++static void
++shell_global_class_init (ShellGlobalClass *klass)
++{
++  GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
++
++  gobject_class->get_property = shell_global_get_property;
++  gobject_class->set_property = shell_global_set_property;
++  gobject_class->finalize = shell_global_finalize;
++
++  shell_global_signals[NOTIFY_ERROR] =
++      g_signal_new ("notify-error",
++                    G_TYPE_FROM_CLASS (klass),
++                    G_SIGNAL_RUN_LAST,
++                    0,
++                    NULL, NULL, NULL,
++                    G_TYPE_NONE, 2,
++                    G_TYPE_STRING,
++                    G_TYPE_STRING);
++  shell_global_signals[LOCATE_POINTER] =
++      g_signal_new ("locate-pointer",
++                    G_TYPE_FROM_CLASS (klass),
++                    G_SIGNAL_RUN_LAST,
++                    0,
++                    NULL, NULL, NULL,
++                    G_TYPE_NONE, 0);
++  shell_global_signals[SHUTDOWN] =
++      g_signal_new ("shutdown",
++                    G_TYPE_FROM_CLASS (klass),
++                    G_SIGNAL_RUN_LAST,
++                    0,
++                    NULL, NULL, NULL,
++                    G_TYPE_NONE, 0);
++
++  props[PROP_SESSION_MODE] =
++    g_param_spec_string ("session-mode", NULL, NULL,
++                         "user",
++                         G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS);
++
++  props[PROP_SCREEN_WIDTH] =
++    g_param_spec_int ("screen-width", NULL, NULL,
++                      0, G_MAXINT, 1,
++                      G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
++
++  props[PROP_SCREEN_HEIGHT] =
++    g_param_spec_int ("screen-height", NULL, NULL,
++                      0, G_MAXINT, 1,
++                      G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
++
++  props[PROP_BACKEND] =
++    g_param_spec_object ("backend", NULL, NULL,
++                         META_TYPE_BACKEND,
++                         G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
++
++  props[PROP_CONTEXT] =
++    g_param_spec_object ("context", NULL, NULL,
++                         META_TYPE_CONTEXT,
++                         G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
++
++  props[PROP_DISPLAY] =
++    g_param_spec_object ("display", NULL, NULL,
++                         META_TYPE_DISPLAY,
++                         G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
++
++  props[PROP_COMPOSITOR] =
++    g_param_spec_object ("compositor", NULL, NULL,
++                         META_TYPE_COMPOSITOR,
++                         G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
++
++  props[PROP_WORKSPACE_MANAGER] =
++    g_param_spec_object ("workspace-manager", NULL, NULL,
++                         META_TYPE_WORKSPACE_MANAGER,
++                         G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
++
++  props[PROP_STAGE] =
++    g_param_spec_object ("stage", NULL, NULL,
++                         CLUTTER_TYPE_STAGE,
++                         G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
++
++  props[PROP_WINDOW_GROUP] =
++    g_param_spec_object ("window-group", NULL, NULL,
++                         CLUTTER_TYPE_ACTOR,
++                         G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
++
++  props[PROP_TOP_WINDOW_GROUP] =
++    g_param_spec_object ("top-window-group", NULL, NULL,
++                         CLUTTER_TYPE_ACTOR,
++                         G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
++
++  props[PROP_WINDOW_MANAGER] =
++    g_param_spec_object ("window-manager", NULL, NULL,
++                         SHELL_TYPE_WM,
++                         G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
++
++  props[PROP_SETTINGS] =
++    g_param_spec_object ("settings", NULL, NULL,
++                         G_TYPE_SETTINGS,
++                         G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
++
++  props[PROP_DATADIR] =
++    g_param_spec_string ("datadir", NULL, NULL,
++                         NULL,
++                         G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
++
++  props[PROP_USERDATADIR] =
++    g_param_spec_string ("userdatadir", NULL, NULL,
++                         NULL,
++                         G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
++
++  props[PROP_FOCUS_MANAGER] =
++    g_param_spec_object ("focus-manager", NULL, NULL,
++                         ST_TYPE_FOCUS_MANAGER,
++                         G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
++
++  props[PROP_FRAME_TIMESTAMPS] =
++    g_param_spec_boolean ("frame-timestamps", NULL, NULL,
++                          FALSE,
++                          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_EXPLICIT_NOTIFY);
++
++  props[PROP_FRAME_FINISH_TIMESTAMP] =
++    g_param_spec_boolean ("frame-finish-timestamp", NULL, NULL,
++                          FALSE,
++                          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_EXPLICIT_NOTIFY);
++
++  props[PROP_SWITCHEROO_CONTROL] =
++    g_param_spec_object ("switcheroo-control", NULL, NULL,
++                         G_TYPE_DBUS_PROXY,
++                         G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
++
++  props[PROP_FORCE_ANIMATIONS] =
++    g_param_spec_boolean ("force-animations", NULL, NULL,
++                          FALSE,
++                          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_EXPLICIT_NOTIFY);
++
++  props[PROP_AUTOMATION_SCRIPT] =
++    g_param_spec_object ("automation-script", NULL, NULL,
++                         G_TYPE_FILE,
++                         G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS);
++
++  g_object_class_install_properties (gobject_class, N_PROPS, props);
++}
++
++/*
++ * _shell_global_init: (skip)
++ * @first_property_name: the name of the first property
++ * @...: the value of the first property, followed optionally by more
++ *  name/value pairs, followed by %NULL
++ *
++ * Initializes the shell global singleton with the construction-time
++ * properties.
++ *
++ * There are currently no such properties, so @first_property_name should
++ * always be %NULL.
++ *
++ * This call must be called before shell_global_get() and shouldn't be called
++ * more than once.
++ */
++void
++_shell_global_init (const char *first_property_name,
++                    ...)
++{
++  va_list argument_list;
++
++  g_return_if_fail (the_object == NULL);
++
++  va_start (argument_list, first_property_name);
++  the_object = SHELL_GLOBAL (g_object_new_valist (SHELL_TYPE_GLOBAL,
++                                                  first_property_name,
++                                                  argument_list));
++  va_end (argument_list);
++
++}
++
++/**
++ * shell_global_get:
++ *
++ * Gets the singleton global object that represents the desktop.
++ *
++ * Return value: (transfer none): the singleton global object
++ */
++ShellGlobal *
++shell_global_get (void)
++{
++  g_return_val_if_fail (the_object, NULL);
++  return the_object;
++}
++
++/**
++ * _shell_global_destroy_gjs_context: (skip)
++ * @self: global object
++ *
++ * Destroys the GjsContext held by ShellGlobal, in order to break reference
++ * counting cycles. (The GjsContext holds a reference to ShellGlobal because
++ * it's available as window.global inside JS.)
++ */
++void
++_shell_global_destroy_gjs_context (ShellGlobal *self)
++{
++  g_clear_object (&self->js_context);
++}
++
++/**
++ * shell_global_get_backend:
++ *
++ * Return value: (transfer none): The #MetaBackend
++ */
++MetaBackend *
++shell_global_get_backend (ShellGlobal *global)
++{
++  return global->backend;
++}
++
++/**
++ * shell_global_get_compositor:
++ *
++ * Return value: (transfer none): The #MetaCompositor
++ */
++MetaCompositor *
++shell_global_get_compositor (ShellGlobal *global)
++{
++  return global->compositor;
++}
++
++/**
++ * shell_global_get_context:
++ *
++ * Return value: (transfer none): The #MetaContext
++ */
++MetaContext *
++shell_global_get_context (ShellGlobal *global)
++{
++  return global->meta_context;
++}
++
++/**
++ * shell_global_get_stage:
++ *
++ * Return value: (transfer none): The default #ClutterStage
++ */
++ClutterStage *
++shell_global_get_stage (ShellGlobal  *global)
++{
++  return global->stage;
++}
++
++/**
++ * shell_global_get_display:
++ *
++ * Return value: (transfer none): The default #MetaDisplay
++ */
++MetaDisplay *
++shell_global_get_display (ShellGlobal  *global)
++{
++  return global->meta_display;
++}
++
++/**
++ * shell_global_get_workspace_manager:
++ *
++ * Return value: (transfer none): The default #MetaWorkspaceManager
++ */
++MetaWorkspaceManager *
++shell_global_get_workspace_manager (ShellGlobal  *global)
++{
++  return global->workspace_manager;
++}
++
++/**
++ * shell_global_get_window_manager:
++ *
++ * Return value: (transfer none): The default #ShellWM
++ */
++ShellWM *
++shell_global_get_window_manager (ShellGlobal  *global)
++{
++  return global->wm;
++}
++
++/**
++ * shell_global_get_focus_manager:
++ *
++ * Return value: (transfer none): The default #StFocusManager
++ */
++StFocusManager *
++shell_global_get_focus_manager (ShellGlobal  *global)
++{
++  return global->focus_manager;
++}
++
++/**
++ * shell_global_get_window_actors:
++ *
++ * Gets the list of #MetaWindowActor for the plugin's screen
++ *
++ * Return value: (element-type Meta.WindowActor) (transfer container): the list of windows
++ */
++GList *
++shell_global_get_window_actors (ShellGlobal *global)
++{
++  GList *filtered = NULL;
++  GList *l;
++
++  g_return_val_if_fail (SHELL_IS_GLOBAL (global), NULL);
++
++  for (l = meta_compositor_get_window_actors (global->compositor); l; l = l->next)
++    if (!meta_window_actor_is_destroyed (l->data))
++      filtered = g_list_prepend (filtered, l->data);
++
++  return g_list_reverse (filtered);
++}
++
++/**
++ * shell_global_get_window_group:
++ *
++ * Return value: (transfer none):
++ */
++ClutterActor *
++shell_global_get_window_group (ShellGlobal *global)
++{
++  return meta_compositor_get_window_group (global->compositor);
++}
++
++/**
++ * shell_global_get_top_window_group:
++ *
++ * Return value: (transfer none):
++ */
++ClutterActor *
++shell_global_get_top_window_group (ShellGlobal *global)
++{
++  return meta_compositor_get_top_window_group (global->compositor);
++}
++
++int
++shell_global_get_screen_width (ShellGlobal *global)
++{
++  int width;
++
++  meta_display_get_size (global->meta_display, &width, NULL);
++  return width;
++}
++
++int
++shell_global_get_screen_height (ShellGlobal *global)
++{
++  int height;
++
++  meta_display_get_size (global->meta_display, NULL, &height);
++  return height;
++}
++
++static void
++global_stage_notify_width (GObject    *gobject,
++                           GParamSpec *pspec,
++                           gpointer    data)
++{
++  ShellGlobal *global = SHELL_GLOBAL (data);
++
++  g_object_notify_by_pspec (G_OBJECT (global), props[PROP_SCREEN_WIDTH]);
++}
++
++static void
++global_stage_notify_height (GObject    *gobject,
++                            GParamSpec *pspec,
++                            gpointer    data)
++{
++  ShellGlobal *global = SHELL_GLOBAL (data);
++
++  g_object_notify_by_pspec (G_OBJECT (global), props[PROP_SCREEN_HEIGHT]);
++}
++
++static gboolean
++global_stage_before_paint (gpointer data)
++{
++  ShellGlobal *global = SHELL_GLOBAL (data);
++
++  if (global->frame_timestamps)
++    shell_perf_log_event (shell_perf_log_get_default (),
++                          "clutter.stagePaintStart");
++
++  return TRUE;
++}
++
++static gboolean
++load_gl_symbol (CoglRenderer *renderer,
++                const char   *name,
++                void        **func)
++{
++  *func = cogl_renderer_get_proc_address (renderer, name);
++  if (!*func)
++    {
++      g_warning ("failed to resolve required GL symbol \"%s\"\n", name);
++      return FALSE;
++    }
++  return TRUE;
++}
++
++static void
++global_stage_after_paint (ClutterStage     *stage,
++                          ClutterStageView *stage_view,
++                          ClutterFrame     *frame,
++                          ShellGlobal      *global)
++{
++  /* At this point, we've finished all layout and painting, but haven't
++   * actually flushed or swapped */
++  ClutterContext *context = clutter_actor_get_context (CLUTTER_ACTOR (stage));
++  ClutterBackend *backend = clutter_context_get_backend (context);
++  CoglContext *cogl_context = clutter_backend_get_cogl_context (backend);
++  CoglDisplay *cogl_display = cogl_context_get_display (cogl_context);
++  CoglRenderer *cogl_renderer = cogl_display_get_renderer (cogl_display);
++
++  if (global->frame_timestamps && global->frame_finish_timestamp)
++    {
++      /* It's interesting to find out when the paint actually finishes
++       * on the GPU. We could wait for this asynchronously with
++       * ARB_timer_query (see https://bugzilla.gnome.org/show_bug.cgi?id=732350
++       * for an implementation of this), but what we actually would
++       * find out then is the latency for drawing a frame, not how much
++       * GPU work was needed, since frames can overlap. Calling glFinish()
++       * is a fairly reliable way to separate out adjacent frames
++       * and measure the amount of GPU work. This is turned on with a
++       * separate property from ::frame-timestamps, since it should not
++       * be turned on if we're trying to actual measure latency or frame
++       * rate.
++       */
++      static void (*finish) (void);
++
++      if (!finish)
++        load_gl_symbol (cogl_renderer, "glFinish", (void **)&finish);
++
++      cogl_context_flush (cogl_context);
++      finish ();
++
++      shell_perf_log_event (shell_perf_log_get_default (),
++                            "clutter.paintCompletedTimestamp");
++    }
++}
++
++static gboolean
++global_stage_after_swap (gpointer data)
++{
++  /* Everything is done, we're ready for a new frame */
++
++  ShellGlobal *global = SHELL_GLOBAL (data);
++
++  if (global->frame_timestamps)
++    shell_perf_log_event (shell_perf_log_get_default (),
++                          "clutter.stagePaintDone");
++
++  return TRUE;
++}
++
++static void
++update_scaling_factor (ShellGlobal  *global,
++                       MetaSettings *settings)
++{
++  ClutterStage *stage = CLUTTER_STAGE (global->stage);
++  StThemeContext *context = st_theme_context_get_for_stage (stage);
++  int scaling_factor;
++
++  scaling_factor = meta_settings_get_ui_scaling_factor (settings);
++  g_object_set (context, "scale-factor", scaling_factor, NULL);
++}
++
++static void
++ui_scaling_factor_changed (MetaSettings *settings,
++                           ShellGlobal  *global)
++{
++  update_scaling_factor (global, settings);
++}
++
++#ifdef HAVE_XWAYLAND
++static void
++on_x11_display_closed (MetaDisplay *display,
++                       ShellGlobal *global)
++{
++  g_signal_handlers_disconnect_by_data (global->stage, global);
++}
++#endif
++
++void
++_shell_global_set_plugin (ShellGlobal *global,
++                          MetaPlugin  *plugin)
++{
++  MetaContext *context;
++  MetaDisplay *display;
++  MetaBackend *backend;
++  MetaSettings *settings;
++#ifdef HAVE_XWAYLAND
++  MetaX11Display *x11_display;
++#endif
++
++  g_return_if_fail (SHELL_IS_GLOBAL (global));
++  g_return_if_fail (global->plugin == NULL);
++
++  display = meta_plugin_get_display (plugin);
++  context = meta_display_get_context (display);
++  backend = meta_context_get_backend (context);
++  global->plugin = plugin;
++  global->wm = shell_wm_new (plugin);
++
++  global->meta_display = display;
++  global->compositor = meta_display_get_compositor (display);
++  global->meta_context = meta_display_get_context (display);
++  global->backend = meta_context_get_backend (context);
++  global->workspace_manager = meta_display_get_workspace_manager (display);
++
++  global->stage = CLUTTER_STAGE (meta_backend_get_stage (global->backend));
++
++  st_clipboard_set_selection (meta_display_get_selection (display));
++
++  g_signal_connect (global->stage, "notify::width",
++                    G_CALLBACK (global_stage_notify_width), global);
++  g_signal_connect (global->stage, "notify::height",
++                    G_CALLBACK (global_stage_notify_height), global);
++
++  global->before_paint_id =
++    clutter_threads_add_repaint_func (CLUTTER_REPAINT_FLAGS_PRE_PAINT,
++                                      global_stage_before_paint,
++                                      global, NULL);
++
++  g_signal_connect (global->stage, "after-paint",
++                    G_CALLBACK (global_stage_after_paint), global);
++
++  global->after_swap_id =
++    clutter_threads_add_repaint_func (CLUTTER_REPAINT_FLAGS_POST_PAINT,
++                                      global_stage_after_swap,
++                                      global, NULL);
++
++  shell_perf_log_define_event (shell_perf_log_get_default(),
++                               "clutter.stagePaintStart",
++                               "Start of stage page repaint",
++                               "");
++  shell_perf_log_define_event (shell_perf_log_get_default(),
++                               "clutter.paintCompletedTimestamp",
++                               "Paint completion on GPU",
++                               "");
++  shell_perf_log_define_event (shell_perf_log_get_default(),
++                               "clutter.stagePaintDone",
++                               "End of frame, possibly including swap time",
++                               "");
++
++#ifdef HAVE_XWAYLAND
++  x11_display = meta_display_get_x11_display (display);
++  if (x11_display && meta_x11_display_get_xdisplay (x11_display))
++    g_signal_connect_object (global->meta_display, "x11-display-closing",
++                             G_CALLBACK (on_x11_display_closed), global, 0);
++#endif
++
++  backend = meta_context_get_backend (shell_global_get_context (global));
++  settings = meta_backend_get_settings (backend);
++  g_signal_connect (settings, "ui-scaling-factor-changed",
++                    G_CALLBACK (ui_scaling_factor_changed), global);
++
++  global->focus_manager = st_focus_manager_get_for_stage (global->stage);
++
++  update_scaling_factor (global, settings);
++}
++
++GjsContext *
++_shell_global_get_gjs_context (ShellGlobal *global)
++{
++  return global->js_context;
++}
++
++/* Code to close all file descriptors before we exec; copied from gspawn.c in GLib.
++ *
++ * Authors: Padraig O'Briain, Matthias Clasen, Lennart Poettering
++ *
++ * http://bugzilla.gnome.org/show_bug.cgi?id=469231
++ * http://bugzilla.gnome.org/show_bug.cgi?id=357585
++ */
++
++/**
++ * shell_global_notify_error:
++ * @global: a #ShellGlobal
++ * @msg: Error message
++ * @details: Error details
++ *
++ * Show a system error notification.  Use this function
++ * when a user-initiated action results in a non-fatal problem
++ * from causes that may not be under system control.  For
++ * example, an application crash.
++ */
++void
++shell_global_notify_error (ShellGlobal  *global,
++                           const char   *msg,
++                           const char   *details)
++{
++  g_signal_emit_by_name (global, "notify-error", msg, details);
++}
++
++/**
++ * shell_global_get_pointer:
++ * @global: the #ShellGlobal
++ * @x: (out): the X coordinate of the pointer, in global coordinates
++ * @y: (out): the Y coordinate of the pointer, in global coordinates
++ * @mods: (out): the current set of modifier keys that are pressed down
++ *
++ * Gets the pointer coordinates and current modifier key state.
++ */
++void
++shell_global_get_pointer (ShellGlobal         *global,
++                          int                 *x,
++                          int                 *y,
++                          ClutterModifierType *mods)
++{
++  ClutterModifierType raw_mods;
++  MetaCursorTracker *tracker;
++  graphene_point_t point;
++
++  tracker = meta_backend_get_cursor_tracker (global->backend);
++  meta_cursor_tracker_get_pointer (tracker, &point, &raw_mods);
++
++  if (x)
++    *x = point.x;
++  if (y)
++    *y = point.y;
++
++  *mods = raw_mods & CLUTTER_MODIFIER_MASK;
++}
++
++/**
++ * shell_global_get_switcheroo_control:
++ * @global: A #ShellGlobal
++ *
++ * Get the global #GDBusProxy instance for the switcheroo-control
++ * daemon.
++ *
++ * Return value: (transfer none): the #GDBusProxy for the daemon,
++ *   or %NULL on error.
++ */
++GDBusProxy *
++shell_global_get_switcheroo_control (ShellGlobal  *global)
++{
++  return global->switcheroo_control;
++}
++
++/**
++ * shell_global_get_settings:
++ * @global: A #ShellGlobal
++ *
++ * Get the global GSettings instance.
++ *
++ * Return value: (transfer none): The GSettings object
++ */
++GSettings *
++shell_global_get_settings (ShellGlobal *global)
++{
++  return global->settings;
++}
++
++/**
++ * shell_global_get_current_time:
++ * @global: A #ShellGlobal
++ *
++ * Returns: the current X server time from the current Clutter, Gdk, or X
++ * event. If called from outside an event handler, this may return
++ * %Clutter.CURRENT_TIME (aka 0), or it may return a slightly
++ * out-of-date timestamp.
++ */
++guint32
++shell_global_get_current_time (ShellGlobal *global)
++{
++  guint32 time;
++
++  /* meta_display_get_current_time() will return the correct time
++     when handling an X or Gdk event, but will return CurrentTime
++     from some Clutter event callbacks.
++
++     clutter_get_current_event_time() will return the correct time
++     from a Clutter event callback, but may return CLUTTER_CURRENT_TIME
++     timestamp if called at other times.
++
++     So we try meta_display_get_current_time() first, since we
++     can recognize a "wrong" answer from that, and then fall back
++     to clutter_get_current_event_time().
++   */
++
++  time = meta_display_get_current_time (global->meta_display);
++  if (time != CLUTTER_CURRENT_TIME)
++    return time;
++
++  return clutter_get_current_event_time ();
++}
++
++static void
++shell_global_app_launched_cb (GAppLaunchContext *context,
++                              GAppInfo          *info,
++                              GVariant          *platform_data,
++                              gpointer           user_data)
++{
++  gint32 pid;
++  const gchar *app_name;
++
++  if (!g_variant_lookup (platform_data, "pid", "i", &pid))
++    return;
++
++  /* If pid == 0 the application was launched through D-Bus
++   * activation, therefore it's already in its own unit */
++  if (pid == 0)
++    return;
++
++  app_name = g_app_info_get_id (info);
++  if (app_name == NULL)
++    app_name = g_app_info_get_executable (info);
++
++  /* Start async request; we don't care about the result */
++  gnome_start_systemd_scope (app_name,
++                             pid,
++                             NULL,
++                             NULL,
++                             NULL, NULL, NULL);
++}
++
++/**
++ * shell_global_create_app_launch_context:
++ * @global: A #ShellGlobal
++ * @timestamp: the timestamp for the launch (or 0 for current time)
++ * @workspace: a workspace index, or -1 to indicate no specific one
++ *
++ * Create a #GAppLaunchContext set up with the correct timestamp, and
++ * targeted to activate on @workspace.
++ *
++ * Return value: (transfer full): A new #GAppLaunchContext
++ */
++GAppLaunchContext *
++shell_global_create_app_launch_context (ShellGlobal *global,
++                                        guint32      timestamp,
++                                        int          workspace)
++{
++  MetaWorkspaceManager *workspace_manager = global->workspace_manager;
++  MetaStartupNotification *sn;
++  MetaLaunchContext *context;
++  MetaWorkspace *ws = NULL;
++
++  sn = meta_display_get_startup_notification (global->meta_display);
++  context = meta_startup_notification_create_launcher (sn);
++
++  if (timestamp == 0)
++    timestamp = shell_global_get_current_time (global);
++  meta_launch_context_set_timestamp (context, timestamp);
++
++  if (workspace > -1)
++    {
++      ws = meta_workspace_manager_get_workspace_by_index (workspace_manager, workspace);
++      meta_launch_context_set_workspace (context, ws);
++    }
++
++  g_signal_connect (context,
++                    "launched",
++                    G_CALLBACK (shell_global_app_launched_cb),
++                    NULL);
++
++  return (GAppLaunchContext *) context;
++}
++
++typedef struct
++{
++  ShellLeisureFunction func;
++  gpointer user_data;
++  GDestroyNotify notify;
++} LeisureClosure;
++
++static gboolean
++run_leisure_functions (gpointer data)
++{
++  ShellGlobal *global = data;
++  g_autoptr (GSList) closures = NULL;
++  GSList *iter;
++
++  global->leisure_function_id = 0;
++
++  /* We started more work since we scheduled the idle */
++  if (global->work_count > 0)
++    return G_SOURCE_REMOVE;
++
++  /* No leisure closures, so we are done */
++  if (global->leisure_closures == NULL)
++    return G_SOURCE_REMOVE;
++
++  closures = g_steal_pointer (&global->leisure_closures);
++
++  for (iter = closures; iter; iter = iter->next)
++    {
++      LeisureClosure *closure = iter->data;
++      closure->func (closure->user_data);
++
++      if (closure->notify)
++        closure->notify (closure->user_data);
++
++      g_free (closure);
++    }
++
++  return G_SOURCE_REMOVE;
++}
++
++static void
++schedule_leisure_functions (ShellGlobal *global)
++{
++  /* This is called when we think we are ready to run leisure functions
++   * by our own accounting. We try to handle other types of business
++   * (like ClutterAnimation) by adding a low priority idle function.
++   *
++   * This won't work properly if the mainloop goes idle waiting for
++   * the vertical blanking interval or waiting for work being done
++   * in another thread.
++   */
++  if (!global->leisure_function_id)
++    {
++      global->leisure_function_id = g_idle_add_full (G_PRIORITY_LOW,
++                                                     run_leisure_functions,
++                                                     global, NULL);
++      g_source_set_name_by_id (global->leisure_function_id, "[gnome-shell] run_leisure_functions");
++    }
++}
++
++/**
++ * shell_global_begin_work:
++ * @global: the #ShellGlobal
++ *
++ * Marks that we are currently doing work. This is used to to track
++ * whether we are busy for the purposes of shell_global_run_at_leisure().
++ * A count is kept and shell_global_end_work() must be called exactly
++ * as many times as shell_global_begin_work().
++ */
++void
++shell_global_begin_work (ShellGlobal *global)
++{
++  global->work_count++;
++}
++
++/**
++ * shell_global_end_work:
++ * @global: the #ShellGlobal
++ *
++ * Marks the end of work that we started with shell_global_begin_work().
++ * If no other work is ongoing and functions have been added with
++ * shell_global_run_at_leisure(), they will be run at the next
++ * opportunity.
++ */
++void
++shell_global_end_work (ShellGlobal *global)
++{
++  g_return_if_fail (global->work_count > 0);
++
++  global->work_count--;
++  if (global->work_count == 0)
++    schedule_leisure_functions (global);
++
++}
++
++/**
++ * shell_global_run_at_leisure:
++ * @global: the #ShellGlobal
++ * @func: function to call at leisure
++ * @user_data: data to pass to @func
++ * @notify: function to call to free @user_data
++ *
++ * Schedules a function to be called the next time the shell is idle.
++ * Idle means here no animations, no redrawing, and no ongoing background
++ * work. Since there is currently no way to hook into the Clutter master
++ * clock and know when is running, the implementation here is somewhat
++ * approximation. Animations may be detected as terminating early if they
++ * can be drawn fast enough so that the event loop goes idle between frames.
++ *
++ * The intent of this function is for performance measurement runs
++ * where a number of actions should be run serially and each action is
++ * timed individually. Using this function for other purposes will
++ * interfere with the ability to use it for performance measurement so
++ * should be avoided.
++ */
++void
++shell_global_run_at_leisure (ShellGlobal         *global,
++                             ShellLeisureFunction func,
++                             gpointer             user_data,
++                             GDestroyNotify       notify)
++{
++  LeisureClosure *closure = g_new (LeisureClosure, 1);
++  closure->func = func;
++  closure->user_data = user_data;
++  closure->notify = notify;
++
++  global->leisure_closures = g_slist_append (global->leisure_closures,
++                                             closure);
++
++  if (global->work_count == 0)
++    schedule_leisure_functions (global);
++}
++
++const char *
++shell_global_get_session_mode (ShellGlobal *global)
++{
++  g_return_val_if_fail (SHELL_IS_GLOBAL (global), "user");
++
++  return global->session_mode;
++}
++
++gboolean
++shell_global_get_force_animations (ShellGlobal *global)
++{
++  return global->force_animations;
++}
++
++void
++shell_global_set_force_animations (ShellGlobal *global,
++                                   gboolean     force)
++{
++  if (force == global->force_animations)
++    return;
++
++  global->force_animations = force;
++  g_object_notify_by_pspec (G_OBJECT (global), props[PROP_FORCE_ANIMATIONS]);
++}
++
++const char *
++shell_global_get_datadir (ShellGlobal *global)
++{
++  return global->datadir;
++}
++
++const char *
++shell_global_get_userdatadir (ShellGlobal *global)
++{
++  return global->userdatadir;
++}
++
++/**
++ * shell_global_get_automation_script:
++ *
++ * Return value: (transfer none):
++ */
++GFile *
++shell_global_get_automation_script (ShellGlobal *global)
++{
++  return global->automation_script;
++}
++
++static void
++delete_variant_cb (GObject      *object,
++                   GAsyncResult *result,
++                   gpointer      user_data)
++{
++  ShellGlobal *global = user_data;
++  g_autoptr (GError) error = NULL;
++
++  if (!g_file_delete_finish (G_FILE (object), result, &error))
++    {
++      if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED) &&
++          !g_error_matches (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND))
++        {
++          g_warning ("Could not delete runtime/persistent state file: %s\n",
++                     error->message);
++        }
++    }
++
++  g_hash_table_remove (global->save_ops, object);
++}
++
++static void
++replace_contents_worker (GTask        *task,
++                         gpointer      source_object,
++                         gpointer      task_data,
++                         GCancellable *cancellable)
++{
++  GFile *file = source_object;
++  GBytes *bytes = task_data;
++  GError *error = NULL;
++  const gchar *data;
++  gsize len;
++
++  data = g_bytes_get_data (bytes, &len);
++
++  if (!g_file_replace_contents (file, data, len, NULL, FALSE,
++                                G_FILE_CREATE_REPLACE_DESTINATION,
++                                NULL, cancellable, &error))
++    g_task_return_error (task, g_steal_pointer (&error));
++  else
++    g_task_return_boolean (task, TRUE);
++}
++
++static void
++replace_contents_async (GFile               *path,
++                        GBytes              *bytes,
++                        GCancellable        *cancellable,
++                        GAsyncReadyCallback  callback,
++                        gpointer             user_data)
++{
++  g_autoptr(GTask) task = NULL;
++
++  g_assert (G_IS_FILE (path));
++  g_assert (bytes != NULL);
++  g_assert (!cancellable || G_IS_CANCELLABLE (cancellable));
++
++  task = g_task_new (path, cancellable, callback, user_data);
++  g_task_set_source_tag (task, replace_contents_async);
++  g_task_set_task_data (task, g_bytes_ref (bytes), (GDestroyNotify)g_bytes_unref);
++  g_task_run_in_thread (task, replace_contents_worker);
++}
++
++static gboolean
++replace_contents_finish (GFile         *file,
++                         GAsyncResult  *result,
++                         GError       **error)
++{
++  return g_task_propagate_boolean (G_TASK (result), error);
++}
++
++static void
++replace_variant_cb (GObject      *object,
++                    GAsyncResult *result,
++                    gpointer      user_data)
++{
++  ShellGlobal *global = user_data;
++  g_autoptr (GError) error = NULL;
++
++  if (!replace_contents_finish (G_FILE (object), result, &error))
++    {
++      if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
++        {
++          g_warning ("Could not replace runtime/persistent state file: %s\n",
++                     error->message);
++        }
++    }
++
++  g_hash_table_remove (global->save_ops, object);
++}
++
++static void
++save_variant (ShellGlobal *global,
++              GFile       *dir,
++              const char  *property_name,
++              GVariant    *variant)
++{
++  g_autoptr (GFile) path = NULL;
++  GCancellable *cancellable;
++
++  path = g_file_get_child (dir, property_name);
++  cancellable = g_hash_table_lookup (global->save_ops, path);
++  g_cancellable_cancel (cancellable);
++
++  cancellable = g_cancellable_new ();
++  g_hash_table_insert (global->save_ops, g_object_ref (path), cancellable);
++
++  if (variant == NULL || g_variant_get_data (variant) == NULL)
++    {
++      g_file_delete_async (path, G_PRIORITY_DEFAULT, cancellable,
++                           delete_variant_cb, global);
++    }
++  else
++    {
++      g_autoptr(GBytes) bytes = NULL;
++
++      bytes = g_bytes_new_with_free_func (g_variant_get_data (variant),
++                                          g_variant_get_size (variant),
++                                          (GDestroyNotify)g_variant_unref,
++                                          g_variant_ref (variant));
++      /* g_file_replace_contents_async() can potentially fsync() from the
++       * calling thread when completing the asynchronous task. Instead, we
++       * want to force that fsync() to a thread to avoid blocking the
++       * compositor main loop. Using our own replace_contents_async()
++       * simply executes the operation synchronously from a thread.
++       */
++      replace_contents_async (path, bytes, cancellable, replace_variant_cb, global);
++    }
++}
++
++static GVariant *
++load_variant (GFile      *dir,
++              const char *property_type,
++              const char *property_name)
++{
++  GVariant *res = NULL;
++  g_autoptr (GMappedFile) mfile = NULL;
++  g_autoptr (GFile) path = NULL;
++  g_autofree char *pathstr = NULL;
++  g_autoptr (GError) local_error = NULL;
++
++  path = g_file_get_child (dir, property_name);
++  pathstr = g_file_get_path (path);
++  mfile = g_mapped_file_new (pathstr, FALSE, &local_error);
++  if (!mfile)
++    {
++      if (!g_error_matches (local_error, G_FILE_ERROR, G_FILE_ERROR_NOENT))
++        {
++          g_warning ("Failed to open runtime state: %s", local_error->message);
++        }
++    }
++  else
++    {
++      g_autoptr (GBytes) bytes = g_mapped_file_get_bytes (mfile);
++      res = g_variant_new_from_bytes (G_VARIANT_TYPE (property_type), bytes, FALSE);
++    }
++
++  return res;
++}
++
++/**
++ * shell_global_set_runtime_state:
++ * @global: a #ShellGlobal
++ * @property_name: Name of the property
++ * @variant: (nullable): A #GVariant, or %NULL to unset
++ *
++ * Change the value of serialized runtime state.
++ */
++void
++shell_global_set_runtime_state (ShellGlobal  *global,
++                                const char   *property_name,
++                                GVariant     *variant)
++{
++  save_variant (global, global->runtime_state_path, property_name, variant);
++}
++
++/**
++ * shell_global_get_runtime_state:
++ * @global: a #ShellGlobal
++ * @property_type: Expected data type
++ * @property_name: Name of the property
++ *
++ * The shell maintains "runtime" state which does not persist across
++ * logout or reboot.
++ *
++ * Returns: (transfer floating): The value of a serialized property, or %NULL if none stored
++ */
++GVariant *
++shell_global_get_runtime_state (ShellGlobal  *global,
++                                const char   *property_type,
++                                const char   *property_name)
++{
++  return load_variant (global->runtime_state_path, property_type, property_name);
++}
++
++/**
++ * shell_global_set_persistent_state:
++ * @global: a #ShellGlobal
++ * @property_name: Name of the property
++ * @variant: (nullable): A #GVariant, or %NULL to unset
++ *
++ * Change the value of serialized persistent state.
++ */
++void
++shell_global_set_persistent_state (ShellGlobal *global,
++                                   const char  *property_name,
++                                   GVariant    *variant)
++{
++  save_variant (global, global->userdatadir_path, property_name, variant);
++}
++
++/**
++ * shell_global_get_persistent_state:
++ * @global: a #ShellGlobal
++ * @property_type: Expected data type
++ * @property_name: Name of the property
++ *
++ * The shell maintains "persistent" state which will persist after
++ * logout or reboot.
++ *
++ * Returns: (transfer none): The value of a serialized property, or %NULL if none stored
++ */
++GVariant *
++shell_global_get_persistent_state (ShellGlobal  *global,
++                                   const char   *property_type,
++                                   const char   *property_name)
++{
++  return load_variant (global->userdatadir_path, property_type, property_name);
++}
++
++void
++_shell_global_locate_pointer (ShellGlobal *global)
++{
++  g_signal_emit (global, shell_global_signals[LOCATE_POINTER], 0);
++}
++
++void
++_shell_global_notify_shutdown (ShellGlobal *global)
++{
++  g_signal_emit (global, shell_global_signals[SHUTDOWN], 0);
++}
++
++/**
++ * shell_global_get_window_tracker:
++ *
++ * Gets window tracker.
++ *
++ * Return value: (transfer none): the window tracker
++ */
++ShellWindowTracker *
++shell_global_get_window_tracker (ShellGlobal *global)
++{
++  if (!global->window_tracker)
++    global->window_tracker = g_object_new (SHELL_TYPE_WINDOW_TRACKER, NULL);
++  return global->window_tracker;
++}
++
++/**
++ * shell_global_get_app_system:
++ *
++ * Gets app system.
++ *
++ * Return value: (transfer none): the app system
++ */
++ShellAppSystem *
++shell_global_get_app_system (ShellGlobal *global)
++{
++  if (!global->app_system)
++    global->app_system = g_object_new (SHELL_TYPE_APP_SYSTEM, NULL);
++  return global->app_system;
++}
++
++/**
++ * shell_global_get_app_cache:
++ *
++ * Gets app cache.
++ *
++ * Return value: (transfer none): the app cache
++ */
++ShellAppCache *
++shell_global_get_app_cache (ShellGlobal *global)
++{
++  if (!global->app_cache)
++    global->app_cache = g_object_new (SHELL_TYPE_APP_CACHE, NULL);
++  return global->app_cache;
++}
++
++/**
++ * shell_global_get_app_usage:
++ *
++ * Gets app usage.
++ *
++ * Return value: (transfer none): the app usage
++ */
++ShellAppUsage *
++shell_global_get_app_usage (ShellGlobal *global)
++{
++  if (!global->app_usage)
++    global->app_usage = g_object_new (SHELL_TYPE_APP_USAGE, NULL);
++  return global->app_usage;
++}
++
++gboolean
++shell_global_get_frame_timestamps (ShellGlobal *global)
++{
++  return global->frame_timestamps;
++}
++
++void
++shell_global_set_frame_timestamps (ShellGlobal *global,
++                                   gboolean     enable)
++{
++  if (global->frame_timestamps != enable)
++    {
++      global->frame_timestamps = enable;
++      g_object_notify_by_pspec (G_OBJECT (global), props[PROP_FRAME_TIMESTAMPS]);
++    }
++}
++
++gboolean
++shell_global_get_frame_finish_timestamp (ShellGlobal *global)
++{
++  return global->frame_finish_timestamp;
++}
++
++void
++shell_global_set_frame_finish_timestamp (ShellGlobal *global,
++                                         gboolean     enable)
++{
++  if (global->frame_finish_timestamp != enable)
++    {
++      global->frame_finish_timestamp = enable;
++      g_object_notify_by_pspec (G_OBJECT (global), props[PROP_FRAME_FINISH_TIMESTAMP]);
++    }
++}
+diff --git a/src/st/st-theme-node-drawing.c b/src/st/st-theme-node-drawing.c
+index b159148655300517ec42da769968ee26dc9fd2ed..9fe474dd7987bca6c851754fdcf6f75426df36d5 100644
+--- a/src/st/st-theme-node-drawing.c
++++ b/src/st/st-theme-node-drawing.c
+@@ -2502,6 +2502,112 @@ st_theme_node_paint_sliced_shadow (StThemeNodePaintState *state,
+ #endif
+ }
+ 
++/* Cache only the procedural rounded-box silhouette path. Image-backed and
++ * prerendered backgrounds use their existing paths. The key includes every
++ * input read by st_theme_node_paint_borders(), the resolved radii used to
++ * create its corner textures, and the target color state. No theme-node or
++ * stylesheet references are retained. Limit both entry count and RGBA area.
++ */
++#define BOX_SHADOW_CACHE_MAX_ENTRIES 32
++#define BOX_SHADOW_CACHE_MAX_PIXELS (1024 * 1024)
++
++typedef struct
++{
++  guint corner_radius[4];
++  float shadow_width, shadow_height;
++  float resource_scale;
++  double blur;
++  guint64 color_state_id;
++  int border_width[4];
++  int border_radius[4];
++  guint32 colors[5];
++} StBoxShadowCacheKey;
++
++typedef struct
++{
++  StBoxShadowCacheKey key;
++  CoglPipeline *pipeline;
++  guint64 pixels;
++} StBoxShadowCacheEntry;
++
++typedef struct
++{
++  GQueue entries;
++  guint64 pixels;
++} StBoxShadowCache;
++
++static void
++box_shadow_cache_entry_free (StBoxShadowCacheEntry *entry)
++{
++  g_object_unref (entry->pipeline);
++  g_free (entry);
++}
++
++static void
++box_shadow_cache_free (StBoxShadowCache *cache)
++{
++  g_queue_clear_full (&cache->entries,
++                      (GDestroyNotify) box_shadow_cache_entry_free);
++  g_free (cache);
++}
++
++static guint32
++box_shadow_cache_color (const CoglColor *color)
++{
++  return ((guint32) color->red << 24) | ((guint32) color->green << 16) |
++         ((guint32) color->blue << 8) | color->alpha;
++}
++
++static StBoxShadowCache *
++box_shadow_cache_get (CoglContext *context)
++{
++  static CoglPipelineKey owner_key = "st-theme-node-box-shadow-cache";
++  CoglPipeline *owner;
++  StBoxShadowCache *cache;
++
++  /* Named pipelines are released during CoglContext.dispose, before the
++   * driver/display is torn down. Context qdata would be finalized too late
++   * to release GL-backed cache entries safely. This owner is never copied.
++   */
++  owner = cogl_context_get_named_pipeline (context, &owner_key);
++  if (!owner)
++    {
++      owner = cogl_pipeline_new (context);
++      cache = g_new0 (StBoxShadowCache, 1);
++      g_object_set_data_full (G_OBJECT (owner), "st-box-shadow-cache", cache,
++                              (GDestroyNotify) box_shadow_cache_free);
++      cogl_context_set_named_pipeline (context, &owner_key, owner);
++    }
++  return g_object_get_data (G_OBJECT (owner), "st-box-shadow-cache");
++}
++
++static void
++box_shadow_cache_key_init (StBoxShadowCacheKey  *key,
++                           StThemeNodePaintState *state,
++                           ClutterPaintContext   *paint_context)
++{
++  StThemeNode *node = state->node;
++  int i;
++
++  /* Also initialize padding, since keys are compared byte-for-byte. */
++  memset (key, 0, sizeof (*key));
++  st_theme_node_reduce_border_radius (node, state->alloc_width, state->alloc_height,
++                                       key->corner_radius);
++  key->shadow_width = state->box_shadow_width;
++  key->shadow_height = state->box_shadow_height;
++  key->resource_scale = state->resource_scale;
++  key->blur = node->box_shadow->blur;
++  key->color_state_id = clutter_color_state_get_id (
++    clutter_paint_context_get_color_state (paint_context));
++  key->colors[0] = box_shadow_cache_color (&node->background_color);
++  for (i = 0; i < 4; i++)
++    {
++      key->border_width[i] = node->border_width[i];
++      key->border_radius[i] = node->border_radius[i];
++      key->colors[i + 1] = box_shadow_cache_color (&node->border_color[i]);
++    }
++}
++
+ static void
+ st_theme_node_prerender_shadow (StThemeNodePaintState *state,
+                                 CoglContext           *ctx,
+@@ -2513,6 +2619,23 @@ st_theme_node_prerender_shadow (StThemeNodePaintState *state,
+   CoglOffscreen *offscreen = NULL;
+   CoglFramebuffer *framebuffer;
+   GError *error = NULL;
++  StBoxShadowCache *cache = box_shadow_cache_get (ctx);
++  StBoxShadowCacheKey key;
++  GList *link;
++
++  box_shadow_cache_key_init (&key, state, paint_context);
++  for (link = cache->entries.head; link; link = link->next)
++    {
++      StBoxShadowCacheEntry *entry = link->data;
++
++      if (memcmp (&entry->key, &key, sizeof (key)) != 0)
++        continue;
++      /* Each actor mutates its own pipeline's opacity/blend constant. */
++      state->box_shadow_pipeline = cogl_pipeline_copy (entry->pipeline);
++      g_queue_unlink (&cache->entries, link);
++      g_queue_push_head_link (&cache->entries, link);
++      return;
++    }
+ 
+   /* Render offscreen */
+   fb_width = ceilf (state->box_shadow_width * state->resource_scale);
+@@ -2562,6 +2685,34 @@ st_theme_node_prerender_shadow (StThemeNodePaintState *state,
+                                                                buffer, state->resource_scale);
+     }
+ 
++  if (state->box_shadow_pipeline)
++    {
++      CoglTexture *texture;
++      guint64 pixels;
++
++      texture = cogl_pipeline_get_layer_texture (state->box_shadow_pipeline, 0);
++      pixels = (guint64) cogl_texture_get_width (texture) *
++               cogl_texture_get_height (texture);
++      if (pixels <= BOX_SHADOW_CACHE_MAX_PIXELS)
++        {
++          StBoxShadowCacheEntry *entry;
++
++          while (cache->entries.length >= BOX_SHADOW_CACHE_MAX_ENTRIES ||
++                 cache->pixels + pixels > BOX_SHADOW_CACHE_MAX_PIXELS)
++            {
++              entry = g_queue_pop_tail (&cache->entries);
++              cache->pixels -= entry->pixels;
++              box_shadow_cache_entry_free (entry);
++            }
++          entry = g_new0 (StBoxShadowCacheEntry, 1);
++          memcpy (&entry->key, &key, sizeof (key));
++          entry->pipeline = cogl_pipeline_copy (state->box_shadow_pipeline);
++          entry->pixels = pixels;
++          g_queue_push_head (&cache->entries, entry);
++          cache->pixels += pixels;
++        }
++    }
++
+   g_clear_error (&error);
+   g_clear_object (&offscreen);
+   g_clear_object (&buffer);
+@@ -2851,7 +3002,7 @@ st_theme_node_paint (StThemeNode           *node,
+          widgets. */
+       if (node->rendered_once && node->cached_textures &&
+           width >= node->box_shadow_min_width && height >= node->box_shadow_min_height &&
+-          fabsf (resource_scale - state->resource_scale) < FLT_EPSILON)
++          fabsf (resource_scale - node->cached_state.resource_scale) < FLT_EPSILON)
+         st_theme_node_paint_state_copy (state, &node->cached_state);
+       else
+         st_theme_node_render_resources (state, node, cogl_context, paint_context,
+diff --git a/src/st/st-theme.c b/src/st/st-theme.c
+index 06d5c4fc05f08dd307f9a6d76cfd5c670460b1aa..5e17e68f69c0e512a0b8d5f4cad1dac703dd2c8d 100644
+--- a/src/st/st-theme.c
++++ b/src/st/st-theme.c
+@@ -68,6 +68,7 @@ struct _StTheme
+ 
+   GHashTable *stylesheets_by_file;
+   GHashTable *files_by_stylesheet;
++  GHashTable *selector_indexes;
+ 
+   CRCascade *cascade;
+ };
+@@ -94,6 +95,33 @@ static guint signals[LAST_SIGNAL] = { 0, };
+ 
+ G_DEFINE_TYPE (StTheme, st_theme, G_TYPE_OBJECT)
+ 
++typedef struct
++{
++  CRStatement *statement;
++  CRSelector *selector;
++  CRSimpleSel *last;
++  guint order;
++} StIndexedSelector;
++
++typedef struct
++{
++  GPtrArray *entries;
++  GPtrArray *fallback;
++  GHashTable *by_class;
++  GHashTable *by_id;
++  gboolean has_imports;
++} StSelectorIndex;
++
++static void
++selector_index_free (StSelectorIndex *index)
++{
++  g_hash_table_unref (index->by_class);
++  g_hash_table_unref (index->by_id);
++  g_ptr_array_unref (index->fallback);
++  g_ptr_array_unref (index->entries);
++  g_free (index);
++}
++
+ /* Quick strcmp.  Test only for == 0 or != 0, not < 0 or > 0.  */
+ #define strqcmp(str,lit,lit_len) \
+   (strlen (str) != (lit_len) || memcmp (str, lit, lit_len))
+@@ -117,6 +145,8 @@ st_theme_init (StTheme *theme)
+   theme->stylesheets_by_file = g_hash_table_new_full (g_file_hash, (GEqualFunc) g_file_equal,
+                                                       (GDestroyNotify)g_object_unref, (GDestroyNotify)cr_stylesheet_unref);
+   theme->files_by_stylesheet = g_hash_table_new (g_direct_hash, g_direct_equal);
++  theme->selector_indexes = g_hash_table_new_full (g_direct_hash, g_direct_equal,
++                                                  NULL, (GDestroyNotify) selector_index_free);
+ }
+ 
+ static void
+@@ -235,6 +265,9 @@ insert_stylesheet (StTheme      *theme,
+   if (stylesheet == NULL)
+     return;
+ 
++  g_hash_table_remove (theme->selector_indexes,
++                       g_hash_table_lookup (theme->stylesheets_by_file, file));
++
+   g_object_ref (file);
+   cr_stylesheet_ref (stylesheet);
+ 
+@@ -322,6 +355,7 @@ st_theme_unload_stylesheet (StTheme    *theme,
+    * since we might still access the files_by_stylesheet hashtable in
+    * _st_theme_resolve_url() during the signal emission.
+    */
++  g_hash_table_remove (theme->selector_indexes, stylesheet);
+   g_hash_table_remove (theme->stylesheets_by_file, file);
+   g_hash_table_remove (theme->files_by_stylesheet, stylesheet);
+   cr_stylesheet_unref (stylesheet);
+@@ -384,6 +418,7 @@ st_theme_finalize (GObject * object)
+ {
+   StTheme *theme = ST_THEME (object);
+ 
++  g_hash_table_destroy (theme->selector_indexes);
+   g_slist_foreach (theme->custom_stylesheets, (GFunc) cr_stylesheet_unref, NULL);
+   g_clear_slist (&theme->custom_stylesheets, NULL);
+ 
+@@ -856,8 +891,13 @@ done:
+   return CR_OK;
+ }
+ 
++static void add_matched_properties (StTheme      *theme,
++                                    CRStyleSheet *sheet,
++                                    StThemeNode  *node,
++                                    GPtrArray    *props);
++
+ static void
+-add_matched_properties (StTheme      *a_this,
++add_matched_properties_linear (StTheme      *a_this,
+                         CRStyleSheet *a_nodesheet,
+                         StThemeNode  *a_node,
+                         GPtrArray    *props)
+@@ -984,6 +1024,216 @@ add_matched_properties (StTheme      *a_this,
+     }
+ }
+ 
++/* Index only a necessary condition on the rightmost simple selector. Full
++ * matching (including ancestry, type inheritance and pseudo classes) still
++ * uses the existing matcher. Keep stylesheet order, including comma lists,
++ * so declaration precedence and specificity bookkeeping do not change.
++ * Imported sheets use the original walk to preserve lazy import resolution.
++ */
++static StSelectorIndex *
++selector_index_new (CRStyleSheet *sheet)
++{
++  StSelectorIndex *index = g_new0 (StSelectorIndex, 1);
++  CRStatement *statement;
++
++  index->entries = g_ptr_array_new_with_free_func (g_free);
++  index->fallback = g_ptr_array_new ();
++  index->by_class = g_hash_table_new_full (g_str_hash, g_str_equal, g_free,
++                                          (GDestroyNotify) g_ptr_array_unref);
++  index->by_id = g_hash_table_new_full (g_str_hash, g_str_equal, g_free,
++                                       (GDestroyNotify) g_ptr_array_unref);
++
++  for (statement = sheet->statements; statement; statement = statement->next)
++    {
++      CRSelector *selector;
++
++      if (statement->type == AT_IMPORT_RULE_STMT)
++        {
++          index->has_imports = TRUE;
++          break;
++        }
++      if (statement->type != RULESET_STMT || !statement->kind.ruleset)
++        continue;
++
++      for (selector = statement->kind.ruleset->sel_list;
++           selector; selector = selector->next)
++        {
++          StIndexedSelector *entry;
++          CRAdditionalSel *additional;
++          GHashTable *table = NULL;
++          const char *key = NULL;
++          GPtrArray *bucket;
++
++          if (!selector->simple_sel)
++            continue;
++
++          entry = g_new0 (StIndexedSelector, 1);
++          entry->statement = statement;
++          entry->selector = selector;
++          entry->last = selector->simple_sel;
++          while (entry->last->next)
++            entry->last = entry->last->next;
++          entry->order = index->entries->len;
++          g_ptr_array_add (index->entries, entry);
++
++          for (additional = entry->last->add_sel;
++               additional; additional = additional->next)
++            {
++              CRString *name = NULL;
++
++              if (additional->type == CLASS_ADD_SELECTOR)
++                {
++                  table = index->by_class;
++                  name = additional->content.class_name;
++                }
++              else if (additional->type == ID_ADD_SELECTOR)
++                {
++                  table = index->by_id;
++                  name = additional->content.id_name;
++                }
++
++              if (name && name->stryng && name->stryng->str)
++                {
++                  key = name->stryng->str;
++                  break;
++                }
++            }
++
++          if (!key)
++            {
++              g_ptr_array_add (index->fallback, entry);
++              continue;
++            }
++
++          bucket = g_hash_table_lookup (table, key);
++          if (!bucket)
++            {
++              bucket = g_ptr_array_new ();
++              g_hash_table_insert (table, g_strdup (key), bucket);
++            }
++          g_ptr_array_add (bucket, entry);
++        }
++    }
++
++  return index;
++}
++
++static int
++compare_indexed_selectors (gconstpointer a,
++                           gconstpointer b)
++{
++  const StIndexedSelector *sa = *(StIndexedSelector * const *) a;
++  const StIndexedSelector *sb = *(StIndexedSelector * const *) b;
++
++  return (sa->order > sb->order) - (sa->order < sb->order);
++}
++
++static void
++append_selector_bucket (GPtrArray *candidates,
++                         GPtrArray *bucket)
++{
++  if (bucket)
++    g_ptr_array_extend (candidates, bucket, NULL, NULL);
++}
++
++static void
++add_matched_properties (StTheme      *theme,
++                        CRStyleSheet *sheet,
++                        StThemeNode  *node,
++                        GPtrArray    *props)
++{
++  StSelectorIndex *index;
++  g_autoptr (GPtrArray) candidates = NULL;
++  GStrv classes;
++  const char *id;
++  StIndexedSelector *previous = NULL;
++  guint i;
++#ifdef ST_THEME_INDEX_VERIFY
++  guint old_len = props->len;
++#endif
++
++  index = g_hash_table_lookup (theme->selector_indexes, sheet);
++  if (!index)
++    {
++      index = selector_index_new (sheet);
++      g_hash_table_insert (theme->selector_indexes, sheet, index);
++    }
++  if (index->has_imports)
++    {
++      add_matched_properties_linear (theme, sheet, node, props);
++      return;
++    }
++
++  candidates = g_ptr_array_new ();
++  append_selector_bucket (candidates, index->fallback);
++  classes = st_theme_node_get_element_classes (node);
++  for (i = 0; classes && classes[i]; i++)
++    append_selector_bucket (candidates,
++                             g_hash_table_lookup (index->by_class, classes[i]));
++  id = st_theme_node_get_element_id (node);
++  if (id)
++    append_selector_bucket (candidates, g_hash_table_lookup (index->by_id, id));
++  g_ptr_array_sort (candidates, compare_indexed_selectors);
++
++  for (i = 0; i < candidates->len; i++)
++    {
++      StIndexedSelector *entry = g_ptr_array_index (candidates, i);
++      gboolean matches = FALSE;
++      enum CRStatus status;
++      CRDeclaration *declaration;
++
++      /* Duplicate class tokens must not duplicate matched declarations. */
++      if (entry == previous)
++        continue;
++      previous = entry;
++      status = sel_matches_style_real (theme, entry->last, node,
++                                       &matches, FALSE, TRUE);
++      if (status != CR_OK || !matches)
++        continue;
++
++      cr_simple_sel_compute_specificity (entry->selector->simple_sel);
++      entry->statement->specificity = entry->selector->simple_sel->specificity;
++      for (declaration = entry->statement->kind.ruleset->decl_list;
++           declaration; declaration = declaration->next)
++        g_ptr_array_add (props, declaration);
++    }
++
++#ifdef ST_THEME_INDEX_VERIFY
++  {
++    g_autoptr (GPtrArray) oracle = g_ptr_array_new ();
++    g_autoptr (GArray) specificity = g_array_new (FALSE, FALSE, sizeof (gulong));
++    static guint checks, failures;
++    gboolean equal;
++
++    for (i = old_len; i < props->len; i++)
++      {
++        CRDeclaration *decl = g_ptr_array_index (props, i);
++        gulong value = decl->parent_statement->specificity;
++        g_array_append_val (specificity, value);
++      }
++    add_matched_properties_linear (theme, sheet, node, oracle);
++    equal = props->len - old_len == oracle->len;
++    for (i = 0; equal && i < oracle->len; i++)
++      {
++        CRDeclaration *decl = g_ptr_array_index (oracle, i);
++        equal = decl == g_ptr_array_index (props, old_len + i) &&
++                decl->parent_statement->specificity ==
++                g_array_index (specificity, gulong, i);
++      }
++    checks++;
++    if (!equal)
++      {
++        failures++;
++        g_warning ("L143VERIFY mismatch check=%u", checks);
++        g_ptr_array_set_size (props, old_len);
++        g_ptr_array_extend (props, oracle, NULL, NULL);
++      }
++    if (checks % 128 == 0)
++      g_message ("L143VERIFY checks=%u failures=%u", checks, failures);
++  }
++#endif
++}
++
+ #define ORIGIN_OFFSET_IMPORTANT (NB_ORIGINS)
+ #define ORIGIN_OFFSET_EXTENSION (NB_ORIGINS * 2)
+ 

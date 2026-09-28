@@ -1,0 +1,35 @@
+--- a/hybris/common/n/linker.cpp
++++ b/hybris/common/n/linker.cpp
+@@ -4714,9 +4714,11 @@
+ 
+   const char* ldpath_env = nullptr;
+   const char* ldpreload_env = nullptr;
++  const char* ldshim_libs_env = nullptr;
+   if (!getauxval(AT_SECURE)) {
+     ldpath_env = getenv("HYBRIS_LD_LIBRARY_PATH");
+     ldpreload_env = getenv("HYBRIS_LD_PRELOAD");
++    ldshim_libs_env = getenv("LD_SHIM_LIBS");
+   }
+ 
+   if (DEFAULT_HYBRIS_LD_LIBRARY_PATH)
+@@ -4725,6 +4727,20 @@
+     parse_LD_LIBRARY_PATH(ldpath_env);
+   parse_LD_PRELOAD(ldpreload_env);
+ 
++  /*
++   * The normal Android N linker path parses LD_SHIM_LIBS, but
++   * libhybris plugin initialization omitted it.  Restore that
++   * behavior so device-specific forced shims can be supplied to
++   * the Android linker namespace.
++   */
++  parse_LD_SHIM_LIBS(ldshim_libs_env);
++
++  if (ldshim_libs_env != nullptr) {
++    fprintf(stderr,
++            "SANTOS_N_SHIM_ENV_PASS %s\\n",
++            ldshim_libs_env);
++  }
++
+   if (sdk_version > 0)
+     set_application_target_sdk_version(sdk_version);
+ 

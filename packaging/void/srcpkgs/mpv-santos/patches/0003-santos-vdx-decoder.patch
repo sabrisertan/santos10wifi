@@ -1,0 +1,52 @@
+--- a/filters/f_decoder_wrapper.h
++++ b/filters/f_decoder_wrapper.h
+@@ -104,6 +104,7 @@
+ };
+ 
+ extern const struct mp_decoder_fns vd_lavc;
++extern const struct mp_decoder_fns vd_santos_vdx;
+ extern const struct mp_decoder_fns ad_lavc;
+ extern const struct mp_decoder_fns ad_spdif;
+ 
+--- a/filters/f_decoder_wrapper.c
++++ b/filters/f_decoder_wrapper.c
+@@ -385,6 +385,7 @@
+ {
+     struct mp_decoder_list *list = talloc_zero(NULL, struct mp_decoder_list);
+     vd_lavc.add_decoders(list);
++    vd_santos_vdx.add_decoders(list);
+     return list;
+ }
+ 
+@@ -440,6 +441,9 @@
+     if (!list) {
+         struct mp_decoder_list *full = talloc_zero(NULL, struct mp_decoder_list);
+         driver->add_decoders(full);
++        if (p->codec->type == STREAM_VIDEO && user_list &&
++            strstr(user_list, "santos_vdx"))
++            vd_santos_vdx.add_decoders(full);
+         const char *codec = p->codec->codec;
+         if (codec && strcmp(codec, "null") == 0)
+             codec = fallback;
+@@ -453,7 +457,10 @@
+         struct mp_decoder_entry *sel = &list->entries[n];
+         MP_VERBOSE(p, "Opening decoder %s\n", sel->decoder);
+ 
+-        p->decoder = driver->create(p->decf, p->codec, sel->decoder);
++        const struct mp_decoder_fns *selected = driver;
++        if (p->codec->type == STREAM_VIDEO && !strcmp(sel->decoder, "santos_vdx"))
++            selected = &vd_santos_vdx;
++        p->decoder = selected->create(p->decf, p->codec, sel->decoder);
+         if (p->decoder) {
+             p->codec->decoder = talloc_strdup(p, sel->decoder);
+             p->codec->decoder_desc = talloc_strdup(p, sel->desc && sel->desc[0] ? sel->desc : NULL);
+--- a/meson.build
++++ b/meson.build
+@@ -209,6 +209,7 @@
+     ## Video
+     'video/csputils.c',
+     'video/decode/vd_lavc.c',
++    'video/decode/vd_santos_vdx.c',
+     'video/filter/refqueue.c',
+     'video/filter/vf_format.c',
+     'video/filter/vf_sub.c',

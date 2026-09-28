@@ -1,0 +1,30 @@
+[
+  {
+    "path": "/etc/sv/gnome51-dev/run",
+    "sha256": "9c4ec232b27b43b6f6c9398165f1fdfd11b893d837bd01cca6935e045a90949e"
+  },
+  {
+    "path": "/etc/sv/gnome51-dev/session-inner.sh",
+    "sha256": "96d06a23f0ef28a12e76cdbfa6ca7648344881d0edbd6cc3d539f73f9f0f2191"
+  },
+  {
+    "path": "/etc/sv/gnome51-dev/control/t",
+    "sha256": "b58311dc8f2a3193844b953fadd62b3fd5f0594c05c10db2c0842957b0dd9af0"
+  },
+  {
+    "path": "/etc/sv/gnome51-dev/log/run",
+    "sha256": "2d48ddeb70036753e2a9df74cbcdcf2a866ba3b316d5ade93ed296fd1017a0d2"
+  },
+  {
+    "path": "/usr/share/alsa/ucm2/conf.d/cloverview_audi/cloverview_audi.conf",
+    "sha256": "b7b22cf69a12b07defe31b32de2c7592955206dafc0936d9c00d9911ba51547e"
+  },
+  {
+    "path": "/usr/share/alsa/ucm2/conf.d/cloverview_audi/HiFi.conf",
+    "sha256": "94714741ec2d33646cbc2d5ea847587cdf2e36f25f677b12fa075a7d82d82de6"
+  },
+  {
+    "path": "/etc/wireplumber/wireplumber.conf.d/50-santos-alsa.conf",
+    "sha256": "327bc6fb30ba217514f06d3e71f7fc8a71258a9cb29f7cb831544fb664d7fa50"
+  }
+]

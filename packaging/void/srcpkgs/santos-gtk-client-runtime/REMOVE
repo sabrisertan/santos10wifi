@@ -1,0 +1,6 @@
+# REMOVE
+case "$ACTION" in
+pre)
+	/usr/libexec/santos-gtk-client-routes remove-session
+	;;
+esac
