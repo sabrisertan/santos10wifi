@@ -27,8 +27,9 @@ The provider still emits its existing missing `MODULE_DESCRIPTION()` warning.
 No complete desktop rebuild, fresh rootfs installation, new 30-minute runtime
 stress test, cold-boot network/power replay or physical video/browser acceptance
 was performed. Previous subsystem acceptance is reported with its original scope
-in the known-issues document. Hosted GitHub Actions has not run; its local verifier
-has been exercised. The private-data scan is bounded and is not a comprehensive
+in the known-issues document. GitHub Actions runs the verifier and GPT fixture tests on pushes and pull
+requests; consult the [Actions page](https://github.com/sabrisertan/santos10wifi/actions)
+for the exact commit result. The private-data scan is bounded and is not a comprehensive
 security audit.
 
 ## Publication follow-up: boot/storage documentation

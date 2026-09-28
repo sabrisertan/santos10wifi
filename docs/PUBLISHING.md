@@ -1,23 +1,33 @@
-# Publishing this source preview
+# Publishing updates
 
-The prepared repository is a standalone Git repository. Publish **this directory**,
-not its parent development workspace. It contains source, selected integration
-references and documentation; images and private evidence remain outside it.
+Canonical repository: [sabrisertan/santos10wifi](https://github.com/sabrisertan/santos10wifi).
+The source preview was published on 2026-09-28. The repository contains source,
+selected integration references and documentation; images and private evidence
+remain outside it.
 
-1. Run `python3 tools/verify-release.py` and check `git status --short`.
-2. Create an empty GitHub repository named `santos10wifi` in the `sabrisertan` account.
-   Do not initialize a second README/license in the GitHub creation form.
-3. Use the configured target below to push the prepared `main` branch:
+For intentional updates in a clone:
 
 ```sh
-git remote add origin git@github.com:sabrisertan/santos10wifi.git
-git push -u origin main
+python3 tools/update-manifest.py
+python3 tools/verify-release.py
+python3 -B -m unittest discover -s tests -v
+git diff --check
+git status --short
 ```
 
-Suggested description: “Experimental Linux 7.2 and GNOME port for the Samsung
-Galaxy Tab 3 10.1 Wi-Fi (GT-P5210), with SGX544 and MSVDX integration.”
+Review the changes, commit them, then push the prepared `main` branch:
 
-Use “experimental source preview” in the release description. Leave firmware and
-boot/rootfs images out of release attachments until their independent build,
-licensing, installation and recovery gates are complete. Do not describe the
-pending physical and full-system tests as passed.
+```sh
+git push origin main
+```
+
+The owner's SSH remote is `git@github.com:sabrisertan/santos10wifi.git`. Publish
+only this repository, not the surrounding development workspace. Check the
+[Actions results](https://github.com/sabrisertan/santos10wifi/actions) for the
+pushed commit.
+
+Use “experimental source preview” in release descriptions. The
+[image-release assessment](IMAGE-RELEASE.md) records why a user-installable image
+is deferred. Leave firmware and boot/rootfs images out of release attachments
+until their independent build, licensing, installation and recovery gates are
+complete. Do not describe pending physical and full-system tests as passed.
