@@ -26,6 +26,12 @@
   "packaging": {
     "source_recipe_revision": 6,
     "full_xbps_src_transaction_this_follow_up": false,
-    "latest_binary_package_registration": "separate device packaging step"
+    "latest_binary_package_registration": "matching installed bytes adopted as pipeline-santos-4.1.0_6",
+    "native_package_files_dependencies_checks": true,
+    "native_protected_packages": 16,
+    "newer_version_hold_fixture_packages": 17,
+    "real_update_all_preview_updates": 111,
+    "system_yt_dlp_held": false,
+    "whole_system_update_executed": false
   }
 }

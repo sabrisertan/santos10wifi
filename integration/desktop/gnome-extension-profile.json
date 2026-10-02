@@ -1,0 +1,53 @@
+{
+  "dash-to-dock@micxgx.gmail.com": {
+    "schema": "org.gnome.shell.extensions.dash-to-dock",
+    "dconf_path": "/org/gnome/shell/extensions/dash-to-dock/",
+    "values": {
+      "dock-position": "'BOTTOM'",
+      "autohide": "true",
+      "intellihide": "false",
+      "dock-fixed": "false",
+      "require-pressure-to-show": "false",
+      "animation-time": "0.15",
+      "show-delay": "0.0",
+      "hide-delay": "0.2",
+      "dash-max-icon-size": "48",
+      "icon-size-fixed": "true",
+      "transparency-mode": "'FIXED'",
+      "background-opacity": "0.9",
+      "running-indicator-style": "'DOTS'",
+      "running-indicator-dominant-color": "false",
+      "show-mounts": "false",
+      "show-trash": "false",
+      "show-windows-preview": "false",
+      "click-action": "'minimize-or-overview'",
+      "multi-monitor": "false",
+      "autohide-in-fullscreen": "true"
+    }
+  },
+  "touchup@mityax": {
+    "schema": "org.gnome.shell.extensions.touchup",
+    "dconf_path": "/org/gnome/shell/extensions/touchup/",
+    "values": {
+      "navigation-bar-enabled": "true",
+      "navigation-bar-ignore-touch-mode": "false",
+      "navigation-bar-mode": "'gestures'",
+      "navigation-bar-primary-monitor-follows-navbar": "false",
+      "navigation-bar-gestures-reserve-space": "true",
+      "desktop-background-gestures-enabled": "true",
+      "overview-background-gestures-enabled": "true",
+      "window-preview-gestures-enabled": "true",
+      "osk-key-popups-enabled": "false",
+      "osk-gestures-swipe-to-close-enabled": "true",
+      "osk-gestures-extend-keys-enabled": "true",
+      "osk-quick-paste-action-enabled": "false",
+      "osk-space-bar-ime-switching-enabled": "true",
+      "panel-menus-swipe-to-open-enabled": "true",
+      "screen-rotate-utils-floating-screen-rotate-button-enabled": "false",
+      "double-tap-to-sleep-enabled": "false",
+      "notification-gestures-enabled": "true",
+      "virtual-touchpad-enabled": "false",
+      "dash-to-dock-integration-enabled": "true"
+    }
+  }
+}

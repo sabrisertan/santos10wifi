@@ -1,0 +1,24 @@
+{
+  "checked": "2026-10-03",
+  "scope": "Reference device only; inspect installed ownership before applying holds elsewhere",
+  "held_versions": {
+    "android-headers-7.1-santos": "android-headers-7.1-santos-7.1.20170630_1",
+    "libhybris-santos": "libhybris-santos-20260908_4",
+    "santos-gtk-client-runtime": "santos-gtk-client-runtime-1.0_8",
+    "mpv-santos-cli": "mpv-santos-cli-0.41.0_1",
+    "libadwaita": "libadwaita-1.9.1_2",
+    "ptyxis": "ptyxis-50.1_2",
+    "gnome-control-center": "gnome-control-center-48.3_3",
+    "gdm": "gdm-48.0_3",
+    "libgdm": "libgdm-48.0_3",
+    "accountsservice": "accountsservice-26.27.3_1",
+    "pipeline-santos": "pipeline-santos-4.1.0_6",
+    "gnome-shell": "gnome-shell-48.7_1",
+    "mutter": "mutter-48.7_1",
+    "gjs": "gjs-1.88.0_2",
+    "gnome-session": "gnome-session-48.0_1",
+    "firefox-santos": "firefox-santos-78.15.0_1"
+  },
+  "stock_yt_dlp_held": false,
+  "stock_mirrored_packages_not_all_custom": true
+}

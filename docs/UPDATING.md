@@ -20,6 +20,29 @@ GDM/AccountsService ABI group must be assessed together with its installed
 dependencies. Normal packages copied from a local mirror are not automatically
 custom and should not all be frozen.
 
+The checked development device now has 16 holds. Its accepted Pipeline and
+Firefox files were adopted into native `pipeline-santos-4.1.0_6` and
+`firefox-santos-78.15.0_1` packages without changing the installed bytes or
+ownership. Firefox profiles remain outside the package. The Firefox package
+conflicts with the normal Firefox/Firefox ESR package because its desktop entry
+has the same name. Private GNOME 51 remains in its separate directory.
+
+The complete reference versions are in
+[protected-package-versions.json](../integration/desktop/protected-package-versions.json).
+They include the custom mpv, Ptyxis and trimmed Settings builds, the matching
+GDM/AccountsService group, and the system `gnome-shell`, `mutter`, `gjs` and
+`gnome-session` support group. The stock Shell/Mutter packages are version 48;
+they are distinct from the running private 51 bundle. Private51 maps the stock
+Gvc library/typelib and GjsPrivate typelib, so those support files and the
+fallback desktop group are kept stable together.
+
+Validation used a freshly synced official repository: the normal update preview
+offered 111 updates and selected none of the 16 protected packages. A separate
+copy of the installed pkgdb was offered newer fixture versions for all 16 plus
+yt-dlp; only yt-dlp was selected. Unholding Ptyxis in that copy selected
+Ptyxis+yt-dlp as the positive control. Fixtures and the whole-system update were
+not installed on the real device. Native file/dependency checks passed.
+
 Hold skips ordinary update-all upgrades. An explicitly named update may override
 the hold, so intentionally replacing a custom package still requires checking the
 candidate. For a planned upgrade, remove its hold, supply the reviewed repository

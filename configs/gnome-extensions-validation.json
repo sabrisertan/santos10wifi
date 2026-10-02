@@ -1,0 +1,76 @@
+{
+  "checked": "2026-10-03",
+  "shell_version": "51.0",
+  "extension_profile": "integration/desktop/gnome-extension-profile.json",
+  "upstream_archives": [
+    {
+      "uuid": "dash-to-dock@micxgx.gmail.com",
+      "archive_url": "https://extensions.gnome.org/download-extension/dash-to-dock@micxgx.gmail.com.shell-extension.zip?shell_version=51",
+      "sha256": "eb7647c03cad6dd1ac608da75ffdd2a2b9f8356b65bb468dc523d7ed3d26e5fc",
+      "version": 109,
+      "shell_51_declared": true
+    },
+    {
+      "uuid": "touchup@mityax",
+      "archive_url": "https://extensions.gnome.org/download-extension/touchup@mityax.shell-extension.zip?shell_version=51",
+      "sha256": "02a9dc326900744bf8a0ac9613de08edb4dddb9199d3b4b87cf61d89a1fbdddd",
+      "version": 22,
+      "shell_51_declared": true
+    }
+  ],
+  "unmodified_upstream_source": true,
+  "native_schemas_compiled": true,
+  "version_validation_disabled": false,
+  "extension_states": "both ACTIVE (1), error lists empty",
+  "same_running_shell_and_modules": true,
+  "native_virtual_touch_cases_passed": [
+    "short bottom swipe reveals dock",
+    "release autohides dock",
+    "long bottom swipe opens overview",
+    "left bottom swipe opens keyboard"
+  ],
+  "probe_and_ui_state_restored": true,
+  "physical_finger_test": false,
+  "idle_comparison": {
+    "sample_seconds_each": 20,
+    "kind": "warm same-session off/dock/both, no windows or concurrent task work",
+    "samples": [
+      {
+        "label": "off",
+        "seconds": 20.245272961999945,
+        "cpu_percent_one_core": 1.4818273903399337,
+        "rss_kb_end": 165196,
+        "pss_kb_end": 152348
+      },
+      {
+        "label": "dock-only",
+        "seconds": 20.244074465001177,
+        "cpu_percent_one_core": 1.9264896534254936,
+        "rss_kb_end": 165912,
+        "pss_kb_end": 153064
+      },
+      {
+        "label": "dock-and-touchup",
+        "seconds": 20.24293197500083,
+        "cpu_percent_one_core": 1.6301986313422194,
+        "rss_kb_end": 166544,
+        "pss_kb_end": 153606
+      }
+    ],
+    "delta_from_off": {
+      "dock-only": {
+        "cpu_percentage_points_one_core": 0.4446622630855599,
+        "rss_kb": 716,
+        "pss_kb": 716
+      },
+      "dock-and-touchup": {
+        "cpu_percentage_points_one_core": 0.14837124100228571,
+        "rss_kb": 1348,
+        "pss_kb": 1258
+      }
+    },
+    "cold_start_memory": false,
+    "general_fps_battery_thermal_or_long_session_acceptance": false
+  },
+  "rollback": "disable only these UUIDs, restore scoped settings and preserve other extensions"
+}

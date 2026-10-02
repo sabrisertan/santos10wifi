@@ -54,6 +54,7 @@ can be protected independently from extractor updates.
 - [Cloverview CPUFreq and managed performance](docs/CPUFREQ.md)
 - [Pipeline playback and system yt-dlp](docs/PIPELINE.md)
 - [Keeping custom packages during Void updates](docs/UPDATING.md)
+- [GNOME 51 touch gestures and an autohiding dock](docs/GNOME_EXTENSIONS.md)
 - [Bootloader compatibility and partition migration](docs/BOOT-AND-STORAGE.md)
 - [Device recovery and installation boundary](docs/RECOVERY.md)
 - [Installable-image feasibility and remaining work](docs/IMAGE-RELEASE.md)

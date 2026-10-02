@@ -16,5 +16,10 @@
   },
   "pipeline_build_id": "d72dc149dc087693bcecb77a54476222440aedb3",
   "standalone_mpv_package": "mpv-santos-cli-0.41.0_1",
-  "standalone_mpv_sha256": "5c7256c29b92cdd1afe715a35b82b4bd525a1c026c766a20ed461e03d868d1e5"
+  "standalone_mpv_sha256": "5c7256c29b92cdd1afe715a35b82b4bd525a1c026c766a20ed461e03d868d1e5",
+  "pipeline_package": "pipeline-santos-4.1.0_6",
+  "firefox_package": "firefox-santos-78.15.0_1",
+  "native_adoption_payload_changed": false,
+  "custom_package_holds": 16,
+  "private_gnome51_replaced": false
 }
