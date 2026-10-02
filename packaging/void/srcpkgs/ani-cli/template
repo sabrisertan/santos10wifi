@@ -1,0 +1,20 @@
+# Template file for 'ani-cli' (local Santos package; upstream source unchanged)
+pkgname=ani-cli
+version=5.1.0
+revision=1
+archs=noarch
+_commit=c99221dcecb35c66815a7a77e5ebebde16c8d06a
+wrksrc="ani-cli-${_commit}"
+depends="aria2 coreutils curl ffmpeg6 fzf grep mpv ncurses patch sed yt-dlp"
+short_desc="Command-line anime browser and player"
+maintainer="Santos10wifi project <santos10wifi@localhost>"
+license="GPL-3.0-or-later"
+homepage="https://github.com/pystardust/ani-cli"
+distfiles="https://codeload.github.com/pystardust/ani-cli/tar.gz/${_commit}"
+checksum=69dfb3188ba49cd8b730e5047c5da4ae4194cf4fd0aacd530ad1762293303376
+
+do_install() {
+	vbin ani-cli
+	vman ani-cli.1
+	vlicense LICENSE
+}

@@ -16,6 +16,7 @@
  *
  **************************************************************************/
 #include "santos-vdx-compat.h"
+#include "santos-vdx-memory.h"
 
 /*
  * Code for the MSVDX/TOPAZ MMU:
@@ -1318,19 +1319,20 @@ int santos_vdx_mmu_inval_consume(void)
 }
 EXPORT_SYMBOL_GPL(santos_vdx_mmu_inval_consume);
 
+static int mmu_quiet = 1;
+module_param(mmu_quiet, int, 0644);
+MODULE_PARM_DESC(mmu_quiet, "1 = suppress per-map breadcrumbs");
+
 void santos_vdx_mmu_invalidate(void)
 {
 	if (!santos_vdx_driver)
 		return;
 	atomic_set(&santos_vdx_priv.msvdx_mmu_invaldc, 1);
 	psb_mmu_flush(santos_vdx_driver, 1);
-	pr_info("santos-vdx-mmu: invalidate set\n");
+	if (!READ_ONCE(mmu_quiet))
+		pr_info("santos-vdx-mmu: invalidate set\n");
 }
 EXPORT_SYMBOL_GPL(santos_vdx_mmu_invalidate);
-
-static int mmu_quiet;
-module_param(mmu_quiet, int, 0644);
-MODULE_PARM_DESC(mmu_quiet, "1 = suppress per-map breadcrumbs");
 
 int santos_vdx_mmu_map_pages(u64 gpu_offset, void *cpu, u64 size)
 {
@@ -1351,8 +1353,13 @@ int santos_vdx_mmu_map_pages(u64 gpu_offset, void *cpu, u64 size)
 	if (!pages)
 		return -ENOMEM;
 
-	for (i = 0; i < npages; i++)
-		pages[i] = virt_to_page(cpu + ((u64)i << PAGE_SHIFT));
+	for (i = 0; i < npages; i++) {
+		pages[i] = santos_vdx_cpu_page(cpu + ((u64)i << PAGE_SHIFT));
+		if (!pages[i]) {
+			kvfree(pages);
+			return -EFAULT;
+		}
+	}
 
 	ret = psb_mmu_insert_pages(santos_vdx_pd, pages, gpu_offset, npages,
 				   0, 0, PSB_MMU_CACHED_MEMORY);
@@ -1367,7 +1374,7 @@ int santos_vdx_mmu_map_pages(u64 gpu_offset, void *cpu, u64 size)
 	if (!mmu_quiet)
 		pr_info("santos-vdx-mmu: mapped va=0x%llx pages=%u pfn0=0x%lx\n",
 			(unsigned long long)gpu_offset, npages,
-			page_to_pfn(virt_to_page(cpu)));
+			page_to_pfn(santos_vdx_cpu_page(cpu)));
 	return 0;
 }
 EXPORT_SYMBOL_GPL(santos_vdx_mmu_map_pages);

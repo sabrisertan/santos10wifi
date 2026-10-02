@@ -39,6 +39,12 @@ drops at 800 MHz to zero at 1.6 GHz, with maintainer-confirmed smooth video.
 The epochs differed and other playback/thermal/allocator gates remain separate.
 [CPUFreq source, policy and installation boundaries](docs/CPUFREQ.md).
 
+The October 3 follow-up publishes the r7 VDX allocation/IRQ/debug fixes, the
+current Pipeline quality/recovery/background-card source, and the Ptyxis/ani-cli
+recipes. Pipeline uses system yt-dlp without a release pin; its custom runtime
+can be protected independently from extractor updates.
+[Playback details](docs/PIPELINE.md), [Void update protection](docs/UPDATING.md).
+
 ## Start here
 
 - [Reproducing the port: verified steps and missing inputs](REPRODUCING.md)
@@ -46,6 +52,8 @@ The epochs differed and other playback/thermal/allocator gates remain separate.
 - [Known bugs and limitations](docs/KNOWN-ISSUES.md)
 - [Architecture and source map](docs/ARCHITECTURE.md)
 - [Cloverview CPUFreq and managed performance](docs/CPUFREQ.md)
+- [Pipeline playback and system yt-dlp](docs/PIPELINE.md)
+- [Keeping custom packages during Void updates](docs/UPDATING.md)
 - [Bootloader compatibility and partition migration](docs/BOOT-AND-STORAGE.md)
 - [Device recovery and installation boundary](docs/RECOVERY.md)
 - [Installable-image feasibility and remaining work](docs/IMAGE-RELEASE.md)

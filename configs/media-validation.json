@@ -1,0 +1,31 @@
+{
+  "checked": "2026-10-03",
+  "kind": "scoped-media-source-follow-up",
+  "pipeline": {
+    "source_reconstruction_files": 170,
+    "native_rust_tests_passed": 36,
+    "device_cases_passed": [
+      "repeated background play/pause and card return",
+      "paused card return with colorbar pixels",
+      "hidden normal window close",
+      "hidden EOF state",
+      "card dismiss cleanup",
+      "real YouTube repeated card return"
+    ],
+    "same_media_generation": true,
+    "private_libmpv_sha256": "b813baa56c2142e80cd655504f5f5aa5b90ac46911b07364a58d2ae978598d9c",
+    "general_live_streams_fullscreen_concurrency_or_image_acceptance": false
+  },
+  "vdx": {
+    "source_revision": "r7",
+    "public_module_build_exit": 0,
+    "normal_matching_720_1080_repeat_and_irq_gate": true,
+    "polling_default_and_recovery_retained": true,
+    "fault_concurrency_pressure_latency_cpu_gain_acceptance": false
+  },
+  "packaging": {
+    "source_recipe_revision": 6,
+    "full_xbps_src_transaction_this_follow_up": false,
+    "latest_binary_package_registration": "separate device packaging step"
+  }
+}

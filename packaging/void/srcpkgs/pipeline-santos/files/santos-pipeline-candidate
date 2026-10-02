@@ -1,0 +1,3 @@
+#!/bin/sh
+# Compatibility command for the retained private runtime, not a second app.
+exec /usr/local/bin/santos-pipeline "$@"

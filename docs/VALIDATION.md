@@ -1,4 +1,4 @@
-# Validation of the 2026-09-28 source preview
+# Source-preview validation
 
 | Check | Result and scope |
 |---|---|
@@ -70,6 +70,32 @@ and documentation/source-policy regressions. See [REPRODUCING.md](../REPRODUCING
 for the remaining full-desktop and device-installation gaps. Earlier file counts
 in this record describe their individual snapshots; current inventory comes from
 the source manifest/verifier, which intentionally excludes Markdown hashes.
+
+## Media/source follow-up: 2026-10-03
+
+The current Linux/GTK/Mutter source patch round trips still match their reviewed
+development trees. Pipeline now contains 36 changed/new files; fresh preparation
+from the hash-pinned 4.1.0 archive matches all 170 files in the current application
+build inventory. The Void recipe carries the identical cumulative patch and
+revision 6. The accepted matching binary passed 36 native Rust tests and six
+bounded device navigation/control cases, including real paused pixels and
+repeated YouTube card return. See [Pipeline](PIPELINE.md) for the exact boundary.
+
+The r7 VDX C sources and new memory/IRQ headers were exported byte for byte. A
+fresh external-module build against the already reconstructed public kernel
+passed compilation and modpost. Its output is a new uninstalled candidate;
+the installed kernel/module IDs are separate. The first export build exposed
+missing new headers in the old public file inventory; that incomplete export
+was corrected before publication and is not counted as a successful build.
+Persistent bootstrap/rollback tests run offline against the exported helper.
+
+Ptyxis now includes the accepted child-environment patch, ani-cli its unchanged
+upstream source recipe, and the standalone mpv launcher has a source integration
+reference. No complete fresh desktop xbps-src transaction, image install, long
+stress, concurrency/fault/pressure or general physical acceptance was added.
+Normalized matching identities and boundaries are in
+[`media-validation.json`](../configs/media-validation.json) and
+[`installed-baseline.json`](../configs/installed-baseline.json).
 
 ## CPUFreq follow-up: 2026-10-02
 

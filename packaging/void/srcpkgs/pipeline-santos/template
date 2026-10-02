@@ -1,7 +1,7 @@
 # Template file for 'pipeline-santos'
 pkgname=pipeline-santos
 version=4.1.0
-revision=4
+revision=6
 build_style=meson
 build_helper=rust
 # libmpv is intentionally private to this application; do not advertise the
@@ -10,7 +10,7 @@ noshlibprovides=yes
 configure_args="-Dprofile=default -Dflatpak=false"
 hostmakedepends="cargo gettext glib-devel gtk4-devel libadwaita-devel meson ninja pkg-config blueprint-compiler desktop-file-utils"
 makedepends="mpv-santos-devel>=0.41.0_8 sqlite-devel"
-depends="gtk4 libadwaita mpv-santos>=0.41.0_8 pipewire santos-gtk-client-runtime webp-pixbuf-loader yt-dlp"
+depends="gtk4 libadwaita libhybris-santos>=20260908_4 pipewire santos-gtk-client-runtime>=1.0_8 webp-pixbuf-loader yt-dlp"
 short_desc="Pipeline-derived Santos YouTube player with embedded libmpv and VDX"
 maintainer="Santos10wifi project <santos10wifi@localhost>"
 license="GPL-3.0-or-later"
@@ -22,13 +22,48 @@ checksum="277779a350be719bf0758d7fa4c26899b2f669fd72a6cbc65fa3f48b61d9edd2"
 # schema: the existing Pipeline subscriptions/history remain usable while the
 # executable and desktop entry are named for the Santos product.
 post_install() {
-	install -d "$DESTDIR/usr/lib/pipeline-santos"
+	# Own the complete private runtime, including schema and the safe launcher.
+	# A private bundled libmpv must not pull in/remove the standalone CLI package.
+	local bundle="$DESTDIR/opt/pipeline-santos-candidate"
+	install -d "$bundle/usr/bin" "$bundle/usr/lib/pipeline-santos" \
+		"$bundle/usr/share/tubefeeder" "$bundle/usr/share/glib-2.0/schemas"
+	mv "$DESTDIR/usr/bin/tubefeeder" "$bundle/usr/bin/tubefeeder"
 	install -m755 /usr/lib/libmpv.so.2.5.0 \
-		"$DESTDIR/usr/lib/pipeline-santos/libmpv.so.2.5.0"
-	ln -sf libmpv.so.2.5.0 "$DESTDIR/usr/lib/pipeline-santos/libmpv.so.2"
-	ln -sf tubefeeder "$DESTDIR/usr/bin/pipeline-santos"
+		"$bundle/usr/lib/pipeline-santos/libmpv.so.2.5.0"
+	ln -sf libmpv.so.2.5.0 "$bundle/usr/lib/pipeline-santos/libmpv.so.2"
+	cp "$DESTDIR/usr/share/tubefeeder/resources.gresource" \
+		"$bundle/usr/share/tubefeeder/resources.gresource"
+	mv "$DESTDIR/usr/share/glib-2.0/schemas/de.schmidhuberj.tubefeeder.gschema.xml" \
+		"$bundle/usr/share/glib-2.0/schemas/"
+	glib-compile-schemas --strict "$bundle/usr/share/glib-2.0/schemas"
+	install -m644 "$FILESDIR/gtk4-client-candidate.ini" "$bundle/gtk4-client-candidate.ini"
+	$CC $CFLAGS "$FILESDIR/santos-proc-match.c" -o santos-proc-match $LDFLAGS
+	$CC $CFLAGS "$FILESDIR/santos-network-exec.c" -o santos-network-exec \
+		$LDFLAGS -static -no-pie
+	install -Dm755 santos-network-exec "$bundle/usr/libexec/pipeline-network/yt-dlp"
+	vinstall santos-proc-match 755 usr/local/bin
+	vinstall "$FILESDIR/santos-pipeline" 755 usr/local/bin
+	vinstall "$FILESDIR/santos-pipeline-candidate" 755 usr/local/bin
+	ln -sf /opt/pipeline-santos-candidate/usr/bin/tubefeeder "$DESTDIR/usr/bin/tubefeeder"
+	ln -sf /usr/local/bin/santos-pipeline "$DESTDIR/usr/bin/pipeline-santos"
 	rm -f "$DESTDIR/usr/share/applications/de.schmidhuberj.tubefeeder.desktop"
 	install -Dm644 "$FILESDIR/santos-pipeline.desktop" \
-		"$DESTDIR/usr/share/applications/santos-pipeline.desktop"
+		"$DESTDIR/usr/share/applications/santos-pipeline-candidate.desktop"
+	install -Dm644 data/icons/de.schmidhuberj.tubefeeder.svg \
+		"$DESTDIR/usr/local/share/icons/hicolor/scalable/apps/de.schmidhuberj.tubefeeder.svg"
+	install -Dm644 data/icons/de.schmidhuberj.tubefeeder-symbolic.svg \
+		"$DESTDIR/usr/local/share/icons/hicolor/symbolic/apps/de.schmidhuberj.tubefeeder-symbolic.svg"
+	# Full file identities are generated from the final staged bytes; never cache
+	# mtimes/inodes or weaken the existing launch gate.
+	(cd "$DESTDIR" && sha256sum \
+		opt/pipeline-santos-candidate/usr/bin/tubefeeder \
+		opt/pipeline-santos-candidate/usr/lib/pipeline-santos/libmpv.so.2.5.0 \
+		opt/pipeline-santos-candidate/usr/share/tubefeeder/resources.gresource) \
+		| sed 's|  opt/|  /opt/|' > "$bundle/identity.sha256"
+	(cd "$DESTDIR" && sha256sum \
+		opt/pipeline-santos-candidate/usr/share/glib-2.0/schemas/de.schmidhuberj.tubefeeder.gschema.xml \
+		opt/pipeline-santos-candidate/usr/share/glib-2.0/schemas/gschemas.compiled \
+		opt/pipeline-santos-candidate/usr/libexec/pipeline-network/yt-dlp) \
+		| sed 's|  opt/|  /opt/|' > "$bundle/data-identity.sha256"
 	vlicense LICENSE
 }

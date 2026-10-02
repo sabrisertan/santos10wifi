@@ -1,0 +1,21 @@
+# INSTALL: non-activating; never reap a user player or restart the compositor.
+case "$ACTION" in
+pre)
+	if [ -x /usr/local/bin/santos-proc-match ] && \
+		[ -n "$(/usr/local/bin/santos-proc-match scan-exact /opt/pipeline-santos-candidate/usr/bin/tubefeeder)" ]; then
+		echo "Close Pipeline normally before replacing its private runtime." >&2
+		exit 1
+	fi
+	;;
+post)
+	# The accepted product account owns the log; existing logs are not truncated.
+	if getent passwd santos >/dev/null; then
+		if [ ! -e /var/log/santos-pipeline-candidate.log ]; then
+			touch /var/log/santos-pipeline-candidate.log
+		fi
+		[ ! -L /var/log/santos-pipeline-candidate.log ] || exit 1
+		chown santos:santos /var/log/santos-pipeline-candidate.log
+		chmod 0644 /var/log/santos-pipeline-candidate.log
+	fi
+	;;
+esac

@@ -316,7 +316,7 @@ index 669a0762fcd53d23249c62cfa69c01e7f7299bdf..e11d60cc0d137a7fd24f33065b052123
 +# Playback is provided by the embedded libmpv/VDX player in src/player.rs.
 +# Clapper/GStreamer are intentionally not product dependencies.
 diff --git a/data/de.schmidhuberj.tubefeeder.gschema.xml b/data/de.schmidhuberj.tubefeeder.gschema.xml
-index 9e0038690fd62a2df6495d3159eb7434ca5cd951..f97e6d8398531fca1e20870dfff7c3c3883d5f2a 100644
+index 9e0038690fd62a2df6495d3159eb7434ca5cd951..5d70190e6a22ef1b01efe40c04c5b72939157c2e 100644
 --- a/data/de.schmidhuberj.tubefeeder.gschema.xml
 +++ b/data/de.schmidhuberj.tubefeeder.gschema.xml
 @@ -17,10 +17,6 @@
@@ -341,7 +341,7 @@ index 9e0038690fd62a2df6495d3159eb7434ca5cd951..f97e6d8398531fca1e20870dfff7c3c3
      <key name="show-splash" type="b">
        <default>true</default>
          <!-- Translators: "Splash" as in the splash text from Minecraft: https://minecraft.wiki/w/Splash. -->
-@@ -112,12 +104,16 @@
+@@ -112,12 +104,21 @@
        <default>false</default>
        <summary>Whether the setup window was already shown.</summary>
      </key>
@@ -359,10 +359,15 @@ index 9e0038690fd62a2df6495d3159eb7434ca5cd951..f97e6d8398531fca1e20870dfff7c3c3
  
 -    <!-- Copied from https://github.com/Rafostar/clapper/blob/master/src/bin/clapper-app/data/glib-2.0/schemas/com.github.rafostar.Clapper.gschema.xml -->
 +    <!-- Pipeline-owned player settings. Playback is embedded libmpv/VDX. -->
++    <key name="player-max-height" type="u">
++      <range min="360" max="1080"/>
++      <default>720</default>
++      <summary>Maximum streaming resolution; source and decoded dimensions remain unchanged</summary>
++    </key>
      <key name="player-volume" type="d">
        <default>1.0</default>
        <summary>Stores last volume value to apply on startup</summary>
-@@ -126,14 +122,5 @@
+@@ -126,14 +127,5 @@
        <default>1.0</default>
        <summary>Stores last speed value to apply on startup</summary>
      </key>
@@ -421,10 +426,26 @@ index 3a4a3b4fc1594bde8c2dfc7d5de675f10b2c0468..ab6b5a0294bd917ea8e4522b67bae6d3
 +  min-height: 1px;
 +}
 diff --git a/data/resources/ui/preferences_dialog.blp b/data/resources/ui/preferences_dialog.blp
-index 9bc87b62595daac7b3e3b04722867f0c9c234a69..9cb25192f53f315c95b4454b154ce9fa81759fed 100644
+index 9bc87b62595daac7b3e3b04722867f0c9c234a69..c806fb751fb5b52458848e5d0e5356d984b8e04f 100644
 --- a/data/resources/ui/preferences_dialog.blp
 +++ b/data/resources/ui/preferences_dialog.blp
-@@ -49,21 +49,6 @@ template $TFPreferencesDialog: Adw.PreferencesDialog {
+@@ -28,6 +28,15 @@ template $TFPreferencesDialog: Adw.PreferencesDialog {
+       }
+     }
+ 
++    Adw.PreferencesGroup {
++      title: _("Video Playback");
++
++      Adw.ComboRow combo_stream_quality {
++        title: _("Streaming Quality");
++        subtitle: _("Highest available H.264 stream up to this resolution and 30 fps. Applies to the next video.");
++      }
++    }
++
+     Adw.PreferencesGroup {
+       title: _("Video Downloads");
+ 
+@@ -49,21 +58,6 @@ template $TFPreferencesDialog: Adw.PreferencesDialog {
        }
      }
  
@@ -446,7 +467,7 @@ index 9bc87b62595daac7b3e3b04722867f0c9c234a69..9cb25192f53f315c95b4454b154ce9fa
      Adw.PreferencesGroup {
        title: _("YouTube Preferences");
  
-@@ -218,16 +203,5 @@ template $TFPreferencesDialog: Adw.PreferencesDialog {
+@@ -218,16 +212,5 @@ template $TFPreferencesDialog: Adw.PreferencesDialog {
        }
      }
  
@@ -700,6 +721,273 @@ index 8c4f9646d3b340f567f5479cc32b78e7fb5834a5..6ed4464a69fc87edfa5e66ee29c27301
                        };
  
                        systemd.user.services = {
+diff --git a/integration/README.md b/integration/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..290f379574a63b39776fceb36da294386c742870
+--- /dev/null
++++ b/integration/README.md
+@@ -0,0 +1,57 @@
++# Pipeline private runtime integration
++
++`santos-pipeline` is the source of the installed desktop launcher. It uses the
++existing private app, resource and libmpv identities; historical `/opt` names
++are intentionally retained to avoid moving binaries or breaking rollback paths.
++
++The private stage must also contain:
++
++- `usr/share/glib-2.0/schemas/de.schmidhuberj.tubefeeder.gschema.xml`, copied from
++  this source tree's `data/` directory;
++- `usr/share/glib-2.0/schemas/gschemas.compiled`, compiled with
++  `glib-compile-schemas --strict`;
++- `usr/libexec/pipeline-network/yt-dlp`, built **static** from
++  `santos-network-exec.c`; every in-app PATH-based yt-dlp entry point uses this
++  boundary so no dynamic graphics preload runs before sanitation;
++- `data-identity.sha256`, containing the full SHA256 of both schema files and
++  the static network helper.
++
++The common GTK environment helper strips inherited GNOME schema paths. The
++launcher therefore sets **only this application's** `GSETTINGS_SCHEMA_DIR`
++after the common helper, leaving its allowlist, global GTK profile and existing
++user dconf values untouched. The application ID and schema path do not change.
++
++`santos-pipeline.desktop` supplies the public name **Pipeline** and the original
++upstream icon. Its historical installed desktop-file ID may be retained for
++existing favorites. URI placeholders are deliberately absent: this binary has
++no GApplication file/URI handler. The stable public command is
++`/usr/local/bin/santos-pipeline`; the old candidate command is a compatibility
++alias, not a second application or a second playback backend.
++
++Normal launches use `RUST_LOG=warn`: fault/error diagnostics and ordinary vendor
++stderr remain, while per-frame INFO and player DEBUG output are not written.
++An explicit `SANTOS_CANDIDATE_RUST_LOG=info,tubefeeder::player=debug` remains
++available for bounded instrumentation. This does not eliminate the binary's
++normal callbacks or establish an FPS gain. Expensive periodic metrics/RPC and
++sample vectors are separately opt-in with `PIPELINE_SANTOS_METRICS=1`.
++
++The VO decoupling preference is supplied before application exec, never with
++`set_var()` after GTK/Tokio threads start. The default is1; an explicit diagnostic
++`SANTOS_VO_LIBMPV_DECOUPLE=0` remains possible. The network child does not inherit
++that video preference or the GTK/schema/private-library environment. The exact
++known TLS-only networking shim is kept, as are user HOME/PATH/proxies and ordinary
++stdin/stdout/stderr; argv is forwarded unchanged to `/usr/bin/yt-dlp`.
++
++Streaming quality defaults to a720p maximum, with360/480/720/1080 choices in
++Preferences. This does not upscale or relabel the bitstream. Only verified
++H.264/MP4 sources at≤30fps are accepted, and the progressive fallback follows
++the same constraints. If HD is only offered at60fps, a lower compatible source
++can still be selected; the actual encoded/decoded width and height are shown,
++separately from the viewport. Download-quality settings remain independent.
++
++The synchronized local recipe now carries the source delta and complete private
++runtime layout, without a runtime dependency on the standalone mpv package.
++The app/private libmpv must still be built and frozen together;
++the standalone `mpv-santos-cli` package is independent and must not be removed
++to install Pipeline metadata. Actual launch/render/recovery acceptance remains
++separate from a file-hash or build check.
+diff --git a/integration/santos-network-exec.c b/integration/santos-network-exec.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..e0b0547887cafc983acfbf7abdacf934c1cdefef
+--- /dev/null
++++ b/integration/santos-network-exec.c
+@@ -0,0 +1,49 @@
++/* SPDX-License-Identifier: GPL-3.0-or-later
++ * Static, single-threaded exec boundary for all Pipeline yt-dlp entry points.
++ * No dynamic loader/preloads run before cleanup. Preserve argv and ordinary
++ * stdin/stdout/stderr; do not log URLs, cookies, tokens or complete arguments.
++ */
++#define _GNU_SOURCE
++#include <errno.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++static const char *const graphics_keys[] = {
++    "LD_PRELOAD", "LD_LIBRARY_PATH", "GDK_BACKEND", "GSK_RENDERER", "GDK_DISABLE",
++    "LIBEGL", "LIBGLESV2", "HYBRIS_ANDROID_SDK_VERSION", "HYBRIS_LINKER_DIR",
++    "HYBRIS_EGLPLATFORM", "HYBRIS_EGLPLATFORM_DIR", "EGL_PLATFORM", "SANTOS_EGL_PLATFORM",
++    "ANDROID_ROOT", "ANDROID_DATA", "LD_SHIM_LIBS", "GI_TYPELIB_PATH", "GNOME_SHELL_DATADIR",
++    "GSETTINGS_SCHEMA_DIR", "SANTOS_GLES2_TRACE", "SANTOS_VO_LIBMPV_DECOUPLE", NULL
++};
++
++int main(int argc, char **argv)
++{
++    const char *tls = "/root/libsantos-tlsfix.so";
++    const char *value = getenv("LD_PRELOAD");
++    char *preload = value ? strdup(value) : NULL;
++    int keep_tls = 0;
++    if (value && !preload)
++        return 125;
++    if (preload) {
++        char *save = NULL;
++        for (char *part = strtok_r(preload, ": \t\r\n", &save); part;
++             part = strtok_r(NULL, ": \t\r\n", &save)) {
++            if (strcmp(part, tls) == 0)
++                keep_tls = 1;
++        }
++    }
++    free(preload);
++    for (size_t i = 0; graphics_keys[i]; i++) {
++        if (unsetenv(graphics_keys[i]) != 0)
++            return 125;
++    }
++    if (keep_tls && setenv("LD_PRELOAD", tls, 1) != 0)
++        return 125;
++    (void)argc;
++    argv[0] = "/usr/bin/yt-dlp";
++    execv(argv[0], argv);
++    fprintf(stderr, "Pipeline network helper: yt-dlp exec failed: %s\n", strerror(errno));
++    return 127;
++}
+diff --git a/integration/santos-pipeline b/integration/santos-pipeline
+new file mode 100644
+index 0000000000000000000000000000000000000000..65d42de024908048e266b88163a81d92a75ffd62
+--- /dev/null
++++ b/integration/santos-pipeline
+@@ -0,0 +1,117 @@
++#!/bin/sh
++# Verified private Pipeline runtime. Internal paths retain their historical
++# names; the public desktop name does not define acceptance or binary identity.
++set -eu
++
++ROOT=/opt/pipeline-santos-candidate
++APP=$ROOT/usr/bin/tubefeeder
++LIBDIR=$ROOT/usr/lib/pipeline-santos
++LIB=$LIBDIR/libmpv.so.2.5.0
++SONAME=$LIBDIR/libmpv.so.2
++IDENTITY=$ROOT/identity.sha256
++SCHEMA_DIR=$ROOT/usr/share/glib-2.0/schemas
++NETWORK_DIR=$ROOT/usr/libexec/pipeline-network
++DATA_IDENTITY=$ROOT/data-identity.sha256
++PROFILE=$ROOT/gtk4-client-candidate.ini
++HELPER=/usr/libexec/santos-client-environment
++PROCMATCH=/usr/local/bin/santos-proc-match
++LOG=/var/log/santos-pipeline-candidate.log
++
++log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >>"$LOG"; }
++
++# Preserve the accepted serialized launch and exact-identity stale-instance
++# cleanup. No cmdline-based shortcut is introduced for application cleanup.
++LOCKDIR=${XDG_RUNTIME_DIR:-/tmp}/santos-pipeline-candidate.lock
++LOCK_WAIT_TRIES=600
++lock_release() { rm -rf "$LOCKDIR" 2>/dev/null || true; }
++acquire_lock() {
++  _tries=0
++  while : ; do
++    if mkdir "$LOCKDIR" 2>/dev/null; then
++      echo "$$" > "$LOCKDIR/pid"
++      return 0
++    fi
++    _owner=$(cat "$LOCKDIR/pid" 2>/dev/null || echo "")
++    if [ -n "$_owner" ] && [ ! -d "/proc/$_owner" ]; then
++      rm -rf "$LOCKDIR" 2>/dev/null || true
++      continue
++    fi
++    _tries=$((_tries + 1))
++    if [ "$_tries" -ge "$LOCK_WAIT_TRIES" ]; then
++      return 1
++    fi
++    sleep 0.2
++  done
++}
++
++# Normal desktop launches already have the product user's live session.
++# This retained convenience path is only for an explicit root invocation.
++if [ "$(id -u)" = 0 ]; then
++  shell_pid=$(pgrep -u santos -f '/root/santos/gnome51/usr/bin/gnome-shell' | head -1 || true)
++  [ -n "$shell_pid" ] || { log "FATAL no live product session for re-exec"; exit 4; }
++  session_bus=$(tr '\0' '\n' <"/proc/$shell_pid/environ" \
++    | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p' | head -1 || true)
++  [ -n "$session_bus" ] || { log "FATAL product session has no DBUS address"; exit 4; }
++  log "re-exec into product session uid=santos bus_present=yes"
++  exec runuser -u santos -- env -i \
++    HOME=/home/santos USER=santos LOGNAME=santos LANG=C.UTF-8 \
++    PATH=/usr/lib/santos-gtk-client-runtime/bin:/usr/local/bin:/usr/bin:/bin \
++    XDG_RUNTIME_DIR=/run/user/1001 WAYLAND_DISPLAY=wayland-0 \
++    DBUS_SESSION_BUS_ADDRESS="$session_bus" \
++    PULSE_SERVER=unix:/run/user/1001/pulse/native \
++    XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=GNOME XDG_SESSION_DESKTOP=gnome \
++    setsid "$0" "$@"
++fi
++
++[ -x "$APP" ] || { log "FATAL missing Pipeline app $APP"; exit 2; }
++[ -f "$LIB" ] || { log "FATAL missing private libmpv $LIB"; exit 2; }
++[ -L "$SONAME" ] || { log "FATAL missing SONAME link $SONAME"; exit 2; }
++[ -f "$PROFILE" ] || { log "FATAL missing private profile $PROFILE"; exit 2; }
++[ -f "$IDENTITY" ] || { log "FATAL missing identity file $IDENTITY"; exit 2; }
++[ -f "$DATA_IDENTITY" ] || { log "FATAL missing Pipeline data identity $DATA_IDENTITY"; exit 2; }
++[ -f "$SCHEMA_DIR/gschemas.compiled" ] || { log "FATAL missing Pipeline settings schema"; exit 2; }
++[ -x "$PROCMATCH" ] || { log "FATAL missing helper $PROCMATCH"; exit 2; }
++[ -x "$NETWORK_DIR/yt-dlp" ] || { log "FATAL missing scoped network helper"; exit 2; }
++
++# The original three-file identity gate remains a full hash on every launch.
++# The independent data gate also binds the schema XML and compiled table.
++# Neither gate caches mtime/inodes or continues after a mismatch.
++for _identity in "$IDENTITY" "$DATA_IDENTITY"; do
++  if ! (cd "$ROOT" && sha256sum -c --status "$_identity") 2>>"$LOG"; then
++    log "FATAL identity mismatch for Pipeline runtime:"
++    (cd "$ROOT" && sha256sum -c "$_identity") >>"$LOG" 2>&1 || true
++    exit 3
++  fi
++done
++log "identity_ok $(tr '\n' ' ' <"$IDENTITY")"
++
++if ! acquire_lock; then
++  log "FATAL could not acquire launcher lock; refusing to launch unlocked"
++  exit 5
++fi
++trap lock_release EXIT INT TERM
++
++# Keep the existing bounded TERM/KILL policy and authoritative pid + starttime
++# + resolved-exe revalidation in the compiled helper. A failed reap is fatal.
++reap_out=$("$PROCMATCH" reap 6000 2>/dev/null) || reap_rc=$?
++reap_rc=${reap_rc:-0}
++if [ "$reap_rc" -ne 0 ]; then
++  log "FATAL stale-instance reap failed rc=$reap_rc; refusing to launch"
++  exit 6
++fi
++case "$reap_out" in
++  *REAP*recorded=0*) ;;
++  *REAP*) log "stale_instances_reaped $(printf '%s' "$reap_out" | tr '\n' ' ')" ;;
++esac
++
++# The common helper deliberately removes an inherited GSETTINGS_SCHEMA_DIR
++# from GNOME. Set this application-specific directory AFTER that sanitation,
++# without adding it to the common allowlist or changing the desktop's schema.
++RUST_LOG=${SANTOS_CANDIDATE_RUST_LOG:-warn} \
++  setsid "$HELPER" --profile "$PROFILE" --exec /usr/bin/env \
++    GSETTINGS_SCHEMA_DIR="$SCHEMA_DIR" \
++    PATH="$NETWORK_DIR:$PATH" \
++    SANTOS_VO_LIBMPV_DECOUPLE="${SANTOS_VO_LIBMPV_DECOUPLE:-1}" \
++    "$APP" "$@" >>"$LOG" 2>&1 &
++
++exit 0
+diff --git a/integration/santos-pipeline-candidate b/integration/santos-pipeline-candidate
+new file mode 100644
+index 0000000000000000000000000000000000000000..d0f0917fcb1b653ca8090c89fa693c8a456d0470
+--- /dev/null
++++ b/integration/santos-pipeline-candidate
+@@ -0,0 +1,3 @@
++#!/bin/sh
++# Compatibility command for the retained private runtime, not a second app.
++exec /usr/local/bin/santos-pipeline "$@"
+diff --git a/integration/santos-pipeline.desktop b/integration/santos-pipeline.desktop
+new file mode 100644
+index 0000000000000000000000000000000000000000..9cab4569ed22dc8a6e5ddba93c4160c96f5ec3eb
+--- /dev/null
++++ b/integration/santos-pipeline.desktop
+@@ -0,0 +1,11 @@
++[Desktop Entry]
++Type=Application
++Name=Pipeline
++GenericName=YouTube Player
++Comment=Follow video creators and watch videos
++Exec=/usr/local/bin/santos-pipeline
++Icon=/usr/local/share/icons/hicolor/scalable/apps/de.schmidhuberj.tubefeeder.svg
++Terminal=false
++Categories=AudioVideo;Video;GTK;
++StartupNotify=true
++StartupWMClass=de.schmidhuberj.tubefeeder
 diff --git a/meson.build b/meson.build
 index 58ee0f3473b3819fc16d16a3cc598377bfd58266..226ed804b7ebfb5cd9cb6b38c63cde4c44abb21a 100644
 --- a/meson.build
@@ -731,7 +1019,7 @@ index ac233a975113db3bba66a8ae6197dd0a5e0cffb1..51a0b6f68472d61baff0eff97bc87c80
 +  description: 'Extra rustc flags used for the embedded libmpv player.'
 +)
 diff --git a/src/backend/client.rs b/src/backend/client.rs
-index 0ada7446d6bffa474d7d0dcf88a26fa44b484559..dd612cb8ce80e96f2f1e0b883810ebe728702366 100644
+index 0ada7446d6bffa474d7d0dcf88a26fa44b484559..49fe36af4fafa9b27133395a9563a4983dce92b2 100644
 --- a/src/backend/client.rs
 +++ b/src/backend/client.rs
 @@ -1,4 +1,7 @@
@@ -742,18 +1030,19 @@ index 0ada7446d6bffa474d7d0dcf88a26fa44b484559..dd612cb8ce80e96f2f1e0b883810ebe7
  
  use chrono::{DateTime, Utc};
  use gdk::gdk_pixbuf::Pixbuf;
-@@ -19,6 +22,10 @@ use crate::{gspawn, tspawn};
+@@ -19,6 +22,11 @@ use crate::{gspawn, tspawn};
  
  use super::{Channel, Filter, SearchItem, SearchStream, Video, VideoFetcherStream};
  
 +const IMAGE_FETCH_TIMEOUT: Duration = Duration::from_secs(8);
 +const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
 +const MAX_IMAGE_DIMENSION: i32 = 320;
++const PROVIDER_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
 +
  gtk::glib::wrapper! {
      pub struct Client(ObjectSubclass<imp::Client>);
  }
-@@ -34,6 +41,21 @@ impl Client {
+@@ -34,8 +42,25 @@ impl Client {
          Object::builder().build()
      }
  
@@ -774,8 +1063,12 @@ index 0ada7446d6bffa474d7d0dcf88a26fa44b484559..dd612cb8ce80e96f2f1e0b883810ebe7
 +
      pub fn setup(&self) -> Result<(), Box<dyn std::error::Error>> {
          let client = reqwest::Client::builder()
++            .connect_timeout(Duration::from_secs(8))
++            .timeout(Duration::from_secs(20))
              .user_agent(format!(
-@@ -49,9 +71,29 @@ impl Client {
+                 "{}/{}",
+                 env!("CARGO_PKG_NAME"),
+@@ -49,9 +74,29 @@ impl Client {
          let mut sqlite_path = glib::user_data_dir();
          sqlite_path.push("tubefeeder");
          sqlite_path.push("data.sqlite");
@@ -806,7 +1099,24 @@ index 0ada7446d6bffa474d7d0dcf88a26fa44b484559..dd612cb8ce80e96f2f1e0b883810ebe7
  
          let mut cache_path = glib::user_cache_dir();
          cache_path.push("tubefeeder");
-@@ -191,37 +233,281 @@ impl Client {
+@@ -138,13 +183,15 @@ impl Client {
+     }
+ 
+     pub async fn setup_async(&self) {
++        // Cached provider configuration is usable without public-instance
++        // discovery. Never strand Search/feed behind a slow discovery endpoint.
++        self.update_internal().await;
+         let settings = &self.imp().settings;
+         if settings.boolean("piped-automatically-manage-instances")
+             && settings.string("youtube-mode") != "rustypipe"
+         {
+             self.refresh_piped_instances().await;
+         }
+-        self.update_internal().await;
+     }
+ 
+     pub fn cleanup(&self) -> Result<(), Box<dyn std::error::Error>> {
+@@ -191,37 +238,281 @@ impl Client {
          Ok(())
      }
  
@@ -913,12 +1223,7 @@ index 0ada7446d6bffa474d7d0dcf88a26fa44b484559..dd612cb8ce80e96f2f1e0b883810ebe7
 +            filters.len()
 +        );
 +        }
- 
--        // All the data is already loaded from sqlite.
--        // Therefore, the `_internal` functions can be used without interacting with the sqlite store.
--        // This also speeds up startup a lot.
--        for (vid, timestamp) in watched {
--            self.watched_internal(self.construct_video(vid), timestamp, false);
++
 +        // All the data is already loaded from sqlite, so the `_internal` functions
 +        // can be used without interacting with the sqlite store.
 +        //
@@ -940,9 +1245,7 @@ index 0ada7446d6bffa474d7d0dcf88a26fa44b484559..dd612cb8ce80e96f2f1e0b883810ebe7
 +            Downloaded(pcore::Video, PathBuf),
 +            Subscription(pcore::Channel),
 +            Filter(Filter),
-         }
--        for vid in watch_later {
--            self.toggle_watch_later_internal(self.construct_video(vid), false);
++        }
 +
 +        // Named fields, not a tuple. A tuple is what allowed the completion log to
 +        // transpose these: `w` was bound to the SUBSCRIPTIONS count and `total` was
@@ -955,9 +1258,7 @@ index 0ada7446d6bffa474d7d0dcf88a26fa44b484559..dd612cb8ce80e96f2f1e0b883810ebe7
 +            downloaded: usize,
 +            subscriptions: usize,
 +            filters: usize,
-         }
--        for (vid, path) in downloaded {
--            self.downloaded_internal(self.construct_video(vid), path, false);
++        }
 +        let counts = Counts {
 +            watched: watched.len(),
 +            watch_later: watch_later.len(),
@@ -965,7 +1266,12 @@ index 0ada7446d6bffa474d7d0dcf88a26fa44b484559..dd612cb8ce80e96f2f1e0b883810ebe7
 +            subscriptions: subscriptions.len(),
 +            filters: filters.len(),
 +        };
-+
+ 
+-        // All the data is already loaded from sqlite.
+-        // Therefore, the `_internal` functions can be used without interacting with the sqlite store.
+-        // This also speeds up startup a lot.
+-        for (vid, timestamp) in watched {
+-            self.watched_internal(self.construct_video(vid), timestamp, false);
 +        // `VecDeque` + `pop_front`, not `Vec` + `remove(0)`.
 +        //
 +        // `remove(0)` shifts every remaining element down, so consuming N items
@@ -978,10 +1284,14 @@ index 0ada7446d6bffa474d7d0dcf88a26fa44b484559..dd612cb8ce80e96f2f1e0b883810ebe7
 +        );
 +        for (video, timestamp) in watched {
 +            work.push_back(Work::Watched(video, timestamp));
-+        }
+         }
+-        for vid in watch_later {
+-            self.toggle_watch_later_internal(self.construct_video(vid), false);
 +        for video in watch_later {
 +            work.push_back(Work::WatchLater(video));
-+        }
+         }
+-        for (vid, path) in downloaded {
+-            self.downloaded_internal(self.construct_video(vid), path, false);
 +        for (video, path) in downloaded {
 +            work.push_back(Work::Downloaded(video, path));
          }
@@ -1106,7 +1416,19 @@ index 0ada7446d6bffa474d7d0dcf88a26fa44b484559..dd612cb8ce80e96f2f1e0b883810ebe7
          Ok(())
      }
  
-@@ -349,83 +635,143 @@ impl Client {
+@@ -234,8 +525,9 @@ impl Client {
+             .expect("Client to be set up");
+         let settings = &self.imp().settings;
+ 
+-        if let Ok(instances) =
+-            tspawn!(async move { ppiped::PipedProvider::find_instances(&client).await })
++        if let Ok(Ok(instances)) =
++            tspawn!(async move { tokio::time::timeout(PROVIDER_DISCOVERY_TIMEOUT,
++                ppiped::PipedProvider::find_instances(&client)).await })
+                 .await
+                 .expect("Failed to spawn tokio")
+         {
+@@ -349,83 +641,143 @@ impl Client {
          self.imp().internal.lock().await
      }
  
@@ -1289,7 +1611,7 @@ index 0ada7446d6bffa474d7d0dcf88a26fa44b484559..dd612cb8ce80e96f2f1e0b883810ebe7
          let mut cache = self.imp().channel_cache.borrow_mut();
          if let Some(cached) = cache.get(&channel.id).and_then(|r| r.upgrade()) {
              if cached.channel() != channel {
-@@ -438,7 +784,7 @@ impl Client {
+@@ -438,7 +790,7 @@ impl Client {
                  // TODO: Error handling
                  let _ = store.update_channel_if_exists(&cached.channel());
  
@@ -1298,7 +1620,7 @@ index 0ada7446d6bffa474d7d0dcf88a26fa44b484559..dd612cb8ce80e96f2f1e0b883810ebe7
                      gspawn!(
                          clone!(
                              #[weak(rename_to = s)]
-@@ -460,29 +806,23 @@ impl Client {
+@@ -460,29 +812,23 @@ impl Client {
              let object = Channel::new(channel);
              cache.insert(id.clone(), object.downgrade());
  
@@ -1344,7 +1666,7 @@ index 0ada7446d6bffa474d7d0dcf88a26fa44b484559..dd612cb8ce80e96f2f1e0b883810ebe7
  
              object
          }
-@@ -523,7 +863,7 @@ impl Client {
+@@ -523,7 +869,7 @@ impl Client {
              let id = video.id.clone();
              let uploader = video.uploader.clone();
              let title = video.title.clone();
@@ -1353,7 +1675,7 @@ index 0ada7446d6bffa474d7d0dcf88a26fa44b484559..dd612cb8ce80e96f2f1e0b883810ebe7
              cache.insert(id.clone(), object.downgrade());
  
              // Prune title_cache entries whose video_cache weak reference can no longer
-@@ -546,7 +886,9 @@ impl Client {
+@@ -546,7 +892,9 @@ impl Client {
      pub(super) fn construct_search_item(&self, item: pcore::SearchItem) -> SearchItem {
          match item {
              pcore::SearchItem::Video(v) => SearchItem::for_video(&self.construct_video(v)),
@@ -1364,7 +1686,7 @@ index 0ada7446d6bffa474d7d0dcf88a26fa44b484559..dd612cb8ce80e96f2f1e0b883810ebe7
          }
      }
  
-@@ -849,8 +1191,12 @@ mod imp {
+@@ -849,8 +1197,12 @@ mod imp {
      use gdk::subclass::prelude::{DerivedObjectProperties, ObjectImpl, ObjectSubclass};
      use glib::{Properties, WeakRef};
      use gtk::glib;
@@ -1379,7 +1701,7 @@ index 0ada7446d6bffa474d7d0dcf88a26fa44b484559..dd612cb8ce80e96f2f1e0b883810ebe7
  
      use crate::backend::{Channel, FilterStore, FiniteVideoStore, SubscriptionsStore, Video};
      use crate::store::{Cache, Store};
-@@ -859,11 +1205,23 @@ mod imp {
+@@ -859,11 +1211,23 @@ mod imp {
      #[properties(wrapper_type = super::Client)]
      pub struct Client {
          pub(super) internal: Arc<Mutex<papi::PipelineApi>>,
@@ -1403,7 +1725,7 @@ index 0ada7446d6bffa474d7d0dcf88a26fa44b484559..dd612cb8ce80e96f2f1e0b883810ebe7
          pub(super) channel_cache: RefCell<HashMap<pcore::ChannelId, WeakRef<Channel>>>,
          pub(super) video_cache: RefCell<HashMap<pcore::VideoId, WeakRef<Video>>>,
          pub(super) title_cache: RefCell<HashMap<pcore::VideoId, String>>,
-@@ -888,9 +1246,13 @@ mod imp {
+@@ -888,9 +1252,13 @@ mod imp {
          fn default() -> Self {
              Self {
                  internal: Default::default(),
@@ -3698,7 +4020,7 @@ index 363b7f61bd91a393417637c7f4abab1c363f5a53..3410afe6d26b4a0bc566e93656eb5233
      impl BoxImpl for ChannelItem {}
  }
 diff --git a/src/gui/preferences_dialog.rs b/src/gui/preferences_dialog.rs
-index 4d8b01ef2b37a71f5684ef5a30ed0db4b1860699..f1260a065a888add243340ec3eb5f24f80cca2cf 100644
+index 4d8b01ef2b37a71f5684ef5a30ed0db4b1860699..615146da47ac1ed0406737598d7cfe6a727a15c9 100644
 --- a/src/gui/preferences_dialog.rs
 +++ b/src/gui/preferences_dialog.rs
 @@ -57,14 +57,12 @@ pub mod imp {
@@ -3716,7 +4038,7 @@ index 4d8b01ef2b37a71f5684ef5a30ed0db4b1860699..f1260a065a888add243340ec3eb5f24f
      use adw::prelude::PreferencesRowExt;
      use adw::subclass::prelude::AdwDialogImpl;
      use adw::subclass::prelude::PreferencesDialogImpl;
-@@ -116,17 +114,10 @@ pub mod imp {
+@@ -116,21 +114,16 @@ pub mod imp {
      #[properties(wrapper_type = super::PreferencesDialog)]
      #[template(resource = "/ui/preferences_dialog.ui")]
      pub struct PreferencesDialog {
@@ -3734,7 +4056,13 @@ index 4d8b01ef2b37a71f5684ef5a30ed0db4b1860699..f1260a065a888add243340ec3eb5f24f
  
          #[template_child]
          combo_download_format: TemplateChild<ComboRow>,
-@@ -160,9 +151,6 @@ pub mod imp {
+         #[template_child]
++        combo_stream_quality: TemplateChild<ComboRow>,
++        #[template_child]
+         entry_custom_download_format: TemplateChild<EntryRow>,
+         #[template_child]
+         entry_custom_yt_dlp_arguments: TemplateChild<EntryRow>,
+@@ -160,9 +153,6 @@ pub mod imp {
          #[template_child]
          entry_peertube_search_api: TemplateChild<EntryRow>,
  
@@ -3744,7 +4072,30 @@ index 4d8b01ef2b37a71f5684ef5a30ed0db4b1860699..f1260a065a888add243340ec3eb5f24f
          #[template_child]
          check_button_rustypipe_then_piped: TemplateChild<CheckButton>,
          #[template_child]
-@@ -210,28 +198,8 @@ pub mod imp {
+@@ -182,6 +172,22 @@ pub mod imp {
+     #[gtk::template_callbacks]
+     impl PreferencesDialog {
+         fn init_settings(&self) {
++            let qualities = crate::stream_quality::QUALITY_HEIGHTS;
++            self.combo_stream_quality.set_model(Some(&gtk::StringList::new(&["360p", "480p", "720p", "1080p"])));
++            let current = crate::stream_quality::max_height(self.settings.uint("player-max-height"));
++            self.combo_stream_quality.set_selected(qualities.iter().position(|value| *value == current).unwrap_or(2) as u32);
++            let obj = self.obj();
++            self.combo_stream_quality.connect_selected_notify(clone!(
++                #[weak]
++                obj,
++                move |row| {
++                    if let Some(height) = qualities.get(row.selected() as usize) {
++                        if let Err(error) = obj.imp().settings.set_uint("player-max-height", *height) {
++                            log::error!("Could not save streaming quality: {error}");
++                        }
++                    }
++                }
++            ));
+             self.settings
+                 .bind(
+                     "reload-on-startup",
+@@ -210,28 +216,8 @@ pub mod imp {
                  )
                  .flags(SettingsBindFlags::DEFAULT)
                  .build();
@@ -3773,7 +4124,7 @@ index 4d8b01ef2b37a71f5684ef5a30ed0db4b1860699..f1260a065a888add243340ec3eb5f24f
              self.settings
                  .bind(
                      "enable-source-youtube",
-@@ -311,7 +279,7 @@ pub mod imp {
+@@ -311,7 +297,7 @@ pub mod imp {
              if let Some(yt_dlp) = &self.yt_dlp_settings {
                  yt_dlp
                      .bind(
@@ -3782,7 +4133,7 @@ index 4d8b01ef2b37a71f5684ef5a30ed0db4b1860699..f1260a065a888add243340ec3eb5f24f
                          &self.entry_youtube_extractor_args.get(),
                          "text",
                      )
-@@ -573,7 +541,7 @@ pub mod imp {
+@@ -573,7 +559,7 @@ pub mod imp {
                                          yt_dlp,
                                          move |res| if let Ok(file) = res {
                                              let _ = yt_dlp.set_string(
@@ -3791,7 +4142,7 @@ index 4d8b01ef2b37a71f5684ef5a30ed0db4b1860699..f1260a065a888add243340ec3eb5f24f
                                                  &file
                                                      .path()
                                                      .as_ref()
-@@ -602,12 +570,12 @@ pub mod imp {
+@@ -602,12 +588,12 @@ pub mod imp {
                      #[strong]
                      yt_dlp,
                      move |_| {
@@ -3806,7 +4157,7 @@ index 4d8b01ef2b37a71f5684ef5a30ed0db4b1860699..f1260a065a888add243340ec3eb5f24f
                              obj.imp().youtube_cookies_changed();
                          }
                      }
-@@ -617,7 +585,7 @@ pub mod imp {
+@@ -617,7 +603,7 @@ pub mod imp {
  
          fn youtube_cookies_changed(&self) {
              if let Some(yt_dlp) = &self.yt_dlp_settings {
@@ -3815,7 +4166,7 @@ index 4d8b01ef2b37a71f5684ef5a30ed0db4b1860699..f1260a065a888add243340ec3eb5f24f
  
                  if file.is_empty() {
                      self.img_youtube_cookies_choose.set_visible(true);
-@@ -729,13 +697,6 @@ pub mod imp {
+@@ -729,13 +715,6 @@ pub mod imp {
                  ));
          }
  
@@ -3829,7 +4180,7 @@ index 4d8b01ef2b37a71f5684ef5a30ed0db4b1860699..f1260a065a888add243340ec3eb5f24f
          #[template_callback]
          fn clear_watch_history(&self) {
              self.client.borrow().delete_watch_history();
-@@ -807,10 +768,6 @@ pub mod imp {
+@@ -807,10 +786,6 @@ pub mod imp {
                  .entry_custom_download_format
                  .set_visible(current_format_index == custom_format_index);
          }
@@ -3840,7 +4191,7 @@ index 4d8b01ef2b37a71f5684ef5a30ed0db4b1860699..f1260a065a888add243340ec3eb5f24f
      }
  
      #[glib::object_subclass]
-@@ -821,17 +778,13 @@ pub mod imp {
+@@ -821,17 +796,14 @@ pub mod imp {
  
          fn new() -> Self {
              Self {
@@ -3851,6 +4202,7 @@ index 4d8b01ef2b37a71f5684ef5a30ed0db4b1860699..f1260a065a888add243340ec3eb5f24f
 -                entry_external_player: Default::default(),
                  entry_custom_yt_dlp_arguments: Default::default(),
                  combo_download_format: Default::default(),
++                combo_stream_quality: Default::default(),
                  entry_custom_download_format: Default::default(),
                  switch_reload_on_startup: Default::default(),
                  switch_watch_history_enabled: Default::default(),
@@ -3858,7 +4210,7 @@ index 4d8b01ef2b37a71f5684ef5a30ed0db4b1860699..f1260a065a888add243340ec3eb5f24f
                  btn_clear_watch_history: Default::default(),
                  switch_source_youtube: Default::default(),
                  piped_api_urls: Default::default(),
-@@ -847,9 +800,7 @@ pub mod imp {
+@@ -847,9 +819,7 @@ pub mod imp {
                  check_button_piped_then_rustypipe: Default::default(),
                  client: Default::default(),
                  settings: Settings::new(crate::config::BASE_ID),
@@ -3869,7 +4221,7 @@ index 4d8b01ef2b37a71f5684ef5a30ed0db4b1860699..f1260a065a888add243340ec3eb5f24f
              }
          }
  
-@@ -872,9 +823,6 @@ pub mod imp {
+@@ -872,9 +842,6 @@ pub mod imp {
              self.init_piped_preferences_urls();
              self.init_youtube_cookies();
              self.init_download();
@@ -4115,7 +4467,7 @@ index 97369fbc2c1666e8bfd7a4cf65314f7c5eb93828..4ae851c2d441fff32481b68881aef9bb
          }
      }
 diff --git a/src/gui/video_page.rs b/src/gui/video_page.rs
-index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba22baa7ff 100644
+index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..f9a68d0b190e448fbfa376cfe57457e3eacfffcb 100644
 --- a/src/gui/video_page.rs
 +++ b/src/gui/video_page.rs
 @@ -1,20 +1,54 @@
@@ -4186,7 +4538,7 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
  
  gtk::glib::wrapper! {
      pub struct VideoPage(ObjectSubclass<imp::VideoPage>)
-@@ -31,527 +65,2860 @@ impl VideoPage {
+@@ -31,527 +65,3074 @@ impl VideoPage {
              .build()
      }
  
@@ -4238,9 +4590,11 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +            &video,
 +            cookies.to_string(),
 +            extractor_args.to_string(),
++            imp.settings.uint("player-max-height"),
 +        );
 +        let generation = imp.begin_resolution();
 +        let resolver = crate::tspawn!(player::resolve_video(request));
++        *imp.resolver_abort.borrow_mut() = Some(resolver.abort_handle());
 +
 +        gspawn!(clone!(
 +            #[weak(rename_to = obj)]
@@ -4254,6 +4608,7 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +                if imp.resolution_generation() != generation {
 +                    return;
 +                }
++                imp.resolver_abort.borrow_mut().take();
 +                match result {
 +                    Ok(stream) => {
 +                        if let Err(error) = imp.start_stream(stream, None) {
@@ -4401,14 +4756,14 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 -        } else {
 -            true
 -        }
-+    pub fn pause(&self) {
-+        self.imp().pause();
++    pub fn test_log_background(&self) {
++        self.imp().test_log_background();
      }
  
 -    fn window(&self) -> Window {
 -        self.root().unwrap().dynamic_cast().unwrap()
-+    pub fn stop(&self) {
-+        self.imp().stop();
++    pub fn pause(&self) {
++        self.imp().pause();
      }
  
 -    fn try_get_downloaded(&self, video: &Video) -> Option<String> {
@@ -4430,8 +4785,8 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 -        } else {
 -            None
 -        }
-+    pub fn finished(&self) -> bool {
-+        self.imp().finished()
++    pub fn stop(&self) {
++        self.imp().stop();
      }
  
 -    fn downloaded_path_or_url(&self, video: &Video) -> String {
@@ -4440,8 +4795,8 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 -        } else {
 -            video.playable_url().to_string()
 -        }
-+    pub fn seek_by(&self, seconds: f64) {
-+        self.imp().seek_by(seconds);
++    pub fn finished(&self) -> bool {
++        self.imp().finished()
      }
  
 -    fn convert_to_clapper_playable_url(&self, video: &Video) -> String {
@@ -4451,7 +4806,10 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 -        {
 -            return downloaded.to_string();
 -        }
--
++    pub fn seek_by(&self, seconds: f64) {
++        self.imp().seek_by(seconds);
++    }
+ 
 -        let url = video.playable_url().to_string();
 -        match video.id().platform.borrow() {
 -            "peertube" => {
@@ -4570,6 +4928,8 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
          #[template_child]
 -        billboard: TemplateChild<clapper_gtk::Billboard>,
 +        pub(super) video_surface: TemplateChild<gtk::GLArea>,
++        replacement_surface: RefCell<Option<gtk::GLArea>>,
++        renderer_fault_consumed: Cell<bool>,
  
 -        #[property(get, set)]
 +        #[property(get, set = Self::set_video, nullable)]
@@ -4622,9 +4982,14 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +        realize_handler: RefCell<Option<glib::SignalHandlerId>>,
 +        map_handler: RefCell<Option<glib::SignalHandlerId>>,
 +        unrealize_handler: RefCell<Option<glib::SignalHandlerId>>,
++        create_context_handler: RefCell<Option<glib::SignalHandlerId>>,
++        retained_gl_context: RefCell<Option<gdk::GLContext>>,
++        retained_frame_generation: Cell<Option<u64>>,
 +        resolution_generation: Cell<u64>,
 +        recovery_attempts: Cell<u8>,
 +        recovery_in_flight: Cell<bool>,
++        recovery_started_at: Cell<Option<std::time::Instant>>,
++        pub(super) resolver_abort: RefCell<Option<tokio::task::AbortHandle>>,
 +        recovery_snapshot: RefCell<Option<RecoverySnapshot>>,
 +        // Retained after a terminal recovery error so the visible Retry action
 +        // can resume from the captured position instead of silently restarting.
@@ -4685,6 +5050,7 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +        /// nothing.
 +        frame_trace: RefCell<Option<std::rc::Rc<crate::player::FrameTraceSink>>>,
 +        after_paint_handler: RefCell<Option<glib::SignalHandlerId>>,
++        after_paint_clock: RefCell<Option<gtk::gdk::FrameClock>>,
 +        /// Standalone wake-latency counter handle, so stage markers never borrow
 +        /// the player RefCell (which can already be borrowed when a wakeup is
 +        /// delivered from inside the GtkGLArea render callback).
@@ -4700,6 +5066,8 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +        control_volume: RefCell<Option<gtk::Scale>>,
 +        control_time: RefCell<Option<Label>>,
 +        control_status: RefCell<Option<Label>>,
++        control_quality: RefCell<Option<Label>>,
++        last_quality_evidence: RefCell<crate::stream_quality::QualityEvidence>,
          pub settings: gtk::gio::Settings,
      }
  
@@ -4709,6 +5077,8 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 -                clapper: Default::default(),
 +                video_overlay: Default::default(),
 +                video_surface: Default::default(),
++                replacement_surface: RefCell::new(None),
++                renderer_fault_consumed: Cell::new(false),
                  video: Default::default(),
 -                billboard: Default::default(),
 +                state: std::marker::PhantomData,
@@ -4738,9 +5108,14 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +                realize_handler: RefCell::new(None),
 +                map_handler: RefCell::new(None),
 +                unrealize_handler: RefCell::new(None),
++                create_context_handler: RefCell::new(None),
++                retained_gl_context: RefCell::new(None),
++                retained_frame_generation: Cell::new(None),
 +                resolution_generation: Cell::new(0),
 +                recovery_attempts: Cell::new(0),
 +                recovery_in_flight: Cell::new(false),
++                recovery_started_at: Cell::new(None),
++                resolver_abort: RefCell::new(None),
 +                recovery_snapshot: RefCell::new(None),
 +                retry_snapshot: RefCell::new(None),
 +                recovery_backoff_source: RefCell::new(None),
@@ -4765,6 +5140,7 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +                render_tick: RefCell::new(None),
 +                frame_trace: RefCell::new(None),
 +                after_paint_handler: RefCell::new(None),
++                after_paint_clock: RefCell::new(None),
 +                wake_counters: RefCell::new(None),
 +                wake_counters_armed: Cell::new(false),
 +                presentation_epoch: Cell::new(0),
@@ -4773,6 +5149,8 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +                control_volume: RefCell::new(None),
 +                control_time: RefCell::new(None),
 +                control_status: RefCell::new(None),
++                control_quality: RefCell::new(None),
++                last_quality_evidence: RefCell::new(crate::stream_quality::QualityEvidence::default()),
                  settings: gtk::gio::Settings::new(BASE_ID),
              }
          }
@@ -4782,6 +5160,9 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
      impl VideoPage {
 -        // Recommended syntax is ugly and the item will be moved to `pedantic` soon.
 -        #[allow(clippy::assigning_clones)]
++        fn current_surface(&self) -> gtk::GLArea {
++            self.replacement_surface.borrow().as_ref().cloned().unwrap_or_else(|| self.video_surface.get())
++        }
          fn set_video(&self, video: Option<Video>) {
 +            if let Some(player) = self.player.borrow_mut().as_mut() {
 +                player.stop();
@@ -4843,6 +5224,7 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +        }
 +
 +        pub(super) fn begin_resolution(&self) -> u64 {
++            if let Some(task) = self.resolver_abort.borrow_mut().take() { task.abort(); }
 +            let generation = self.resolution_generation.get().wrapping_add(1);
 +            self.resolution_generation.set(generation);
 +            self.state_value.set(PlaybackState::Buffering);
@@ -4869,6 +5251,8 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +        }
 +
 +        pub(super) fn reset_recovery(&self) {
++            if let Some(task) = self.resolver_abort.borrow_mut().take() { task.abort(); }
++            self.recovery_started_at.set(None);
 +            if let Some(source) = self.recovery_backoff_source.borrow_mut().take() {
 +                source.remove();
 +            }
@@ -4885,6 +5269,8 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +        }
 +
 +        pub(super) fn set_player_error(&self, error: String) {
++            if let Some(task) = self.resolver_abort.borrow_mut().take() { task.abort(); }
++            self.recovery_started_at.set(None);
 +            *self.terminal_error.borrow_mut() = Some(error.clone());
 +            self.recovery_in_flight.set(false);
 +            if let Some(source) = self.recovery_backoff_source.borrow_mut().take() {
@@ -4910,10 +5296,13 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +            let video = self.video.borrow().clone()?;
 +            let cookies = self.settings.string("yt-dlp-cookies-file");
 +            let extractor_args = self.settings.string("yt-dlp-extractor-args");
++            let quality = self.recovery_snapshot.borrow().as_ref().map_or_else(
++                || self.settings.uint("player-max-height"), |snapshot| snapshot.max_height);
 +            Some(VideoRequest::from_video(
 +                &video,
 +                cookies.to_string(),
 +                extractor_args.to_string(),
++                quality,
 +            ))
 +        }
 +
@@ -4969,7 +5358,7 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +                }
 +            }
 +            self.mark_wake_stage(crate::player::WakeStage::Queue);
-+            self.video_surface.queue_render();
++            self.current_surface().queue_render();
 +        }
 +
 +        pub(super) fn render_wakeup(&self) {
@@ -4987,6 +5376,11 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +        /// GtkGLArea realized. `make_current()` here is the first point at which
 +        /// the GDK/SantosGL context either exists or does not.
 +        fn on_glarea_realize(&self, area: &gtk::GLArea) {
++            if std::env::var("PIPELINE_SANTOS_TEST_RENDERER_FAIL_ONCE").as_deref() == Ok("1")
++                && !self.renderer_fault_consumed.replace(true) {
++                let error = glib::Error::new(gtk::gdk::GLError::NotAvailable, "Bounded test-only first GtkGLArea error");
++                area.set_error(Some(&error));
++            }
 +            log::info!(
 +                "Pipeline lifecycle stage=glarea-realized size={}x{} realized={}",
 +                area.width(),
@@ -5007,6 +5401,7 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +                    }
 +                }
 +                None => {
++                    *self.retained_gl_context.borrow_mut() = area.context();
 +                    log::info!(
 +                        "Pipeline lifecycle stage=glarea-realized status=gl-context-ok \
 +                         make_current=ok"
@@ -5030,6 +5425,7 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +                                obj.imp().note_after_paint();
 +                            });
 +                            *self.after_paint_handler.borrow_mut() = Some(handler);
++                            *self.after_paint_clock.borrow_mut() = Some(clock);
 +                            log::info!(
 +                                "Pipeline frame trace after_paint_armed source=gdk_frame_clock::after_paint"
 +                            );
@@ -5072,6 +5468,16 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +        /// on a real `MPV_RENDER_UPDATE_FRAME` -- but it must not be the thing that
 +        /// CONSTRUCTS the renderer, or bootstrap becomes circular.
 +        fn bootstrap_render_context(&self) {
++            let area = self.current_surface();
++            if !area.is_realized() { return; }
++            area.make_current();
++            if let Some(error) = area.error() {
++                if let Some(player) = self.player.borrow_mut().as_mut() {
++                    player.report_glarea_error(&error.to_string());
++                }
++                return;
++            }
++            *self.retained_gl_context.borrow_mut() = area.context();
 +            if self.player.borrow().is_none() {
 +                // The player does not exist yet: the GLArea realizes before the
 +                // player is created. The authoritative bootstrap site is
@@ -5114,6 +5520,15 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +            self.bootstrap_render_context();
 +            self.arm_render_timer();
 +            self.pump_render_update();
++            if self.retained_frame_generation.get().is_some() {
++                // GTK recreated its FBO. Cached paused GPU frame resources are
++                // not sufficient pixel evidence after that transition; obtain
++                // a fresh decoded frame at the same paused timestamp instead.
++                if let Some(player) = self.player.borrow_mut().as_mut() {
++                    player.refresh_paused_surface_frame();
++                }
++                area.queue_render();
++            }
 +        }
 +
 +        /// Bounded, self-timed render driver.
@@ -5192,7 +5607,7 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +            // widget's own imp (a GtkGLArea has no imp of ours).
 +            let weak = glib::WeakRef::<super::VideoPage>::new();
 +            weak.set(Some(&self.obj()));
-+            let id = self.video_surface.add_tick_callback(move |_area, _clock| {
++            let id = self.current_surface().add_tick_callback(move |_area, _clock| {
 +                let Some(obj) = weak.upgrade() else {
 +                    return glib::ControlFlow::Break;
 +                };
@@ -5258,14 +5673,14 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +            if !self.page_is_active() {
 +                return;
 +            }
-+            let area = &self.video_surface;
++            let area = self.current_surface();
 +            // `mpv_render_context_update()` is GL-context-bound, so the pump has
 +            // to run with the GLArea's own context current.
 +            area.make_current();
 +            if let Some(error) = area.error() {
-+                log::error!(
-+                    "Pipeline render pump: GtkGLArea has no usable GL context: {error}"
-+                );
++                if let Ok(mut guard) = self.player.try_borrow_mut() {
++                    if let Some(player) = guard.as_mut() { player.report_glarea_error(&error.to_string()); }
++                }
 +                return;
 +            }
 +            let should_queue = match self.player.try_borrow_mut() {
@@ -5284,7 +5699,7 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +                if let Some(player) = self.player.borrow_mut().as_mut() {
 +                    player.note_queue_render(crate::player::QueueRenderReason::PumpFrame);
 +                }
-+                self.video_surface.queue_render();
++                self.current_surface().queue_render();
 +            }
 +        }
 +
@@ -5302,24 +5717,54 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +        /// go through yt-dlp: there is no media problem to re-resolve.
 +        pub(super) fn retry_renderer(&self) {
 +            log::info!("Pipeline lifecycle stage=renderer-retry requested=by-user");
++            let old = self.current_surface();
++            if !self.release_render_context(&old) {
++                self.set_player_error("Renderer retry cannot safely release the old GL context".into());
++                return;
++            }
++            if let Some(timer) = self.render_timer.borrow_mut().take() { timer.remove(); }
++            if let Some(tick) = self.render_tick.borrow_mut().take() { tick.remove(); }
++            for slot in [&self.render_handler, &self.resize_handler, &self.realize_handler,
++                         &self.map_handler, &self.unrealize_handler, &self.create_context_handler] {
++                if let Some(handler) = slot.borrow_mut().take() { old.disconnect(handler); }
++            }
++            if let Some(handler) = self.after_paint_handler.borrow_mut().take() {
++                if let Some(clock) = self.after_paint_clock.borrow_mut().take() { clock.disconnect(handler); }
++            }
 +            if let Some(player) = self.player.borrow_mut().as_mut() {
 +                player.retry_renderer();
 +            }
-+            self.pump_render_update();
++            self.cover_presentation("renderer-recreated");
++            let area = gtk::GLArea::new();
++            area.set_valign(Align::Fill);
++            area.set_halign(Align::Fill);
++            area.set_vexpand(true);
++            *self.replacement_surface.borrow_mut() = Some(area.clone());
++            // Hook and configure the NEW widget before parenting realizes it.
++            // This actually re-enters GdkGLContext construction rather than
++            // queueing another render on the old permanently failed widget.
++            self.setup_surface(true);
++            self.video_overlay.set_child(Some(&area));
++            log::info!("Pipeline lifecycle stage=renderer-retry new_glarea=true resolver_budget_unchanged=true");
 +        }
 +
-+        fn release_render_context(&self, area: &gtk::GLArea) {
-+            // GTK explicitly permits GL cleanup from unrealize after making
-+            // the GLArea context current. Do not guess if the widget is already
-+            // unrealized; the core is deliberately kept alive in that case.
-+            if !area.is_realized() {
-+                log::error!("GtkGLArea unrealized before current-context cleanup");
-+                return;
++        fn release_render_context(&self, area: &gtk::GLArea) -> bool {
++            if self.player.borrow().as_ref().is_none_or(|player| !player.has_render_context()) {
++                self.retained_gl_context.borrow_mut().take();
++                self.retained_frame_generation.set(None);
++                return true;
 +            }
-+            area.make_current();
-+            if let Some(error) = area.error() {
-+                log::error!("GtkGLArea context cleanup failed: {error}");
-+                return;
++            // A minimized page can be disposed before it is reparented. Its
++            // exact original GDK context remains owned until libmpv is freed.
++            let context = self.retained_gl_context.borrow().clone().or_else(|| area.context());
++            let Some(context) = context else {
++                log::error!("GtkGLArea context cleanup failed: original context unavailable");
++                return false;
++            };
++            context.make_current();
++            if gdk::GLContext::current().as_ref() != Some(&context) {
++                log::error!("GtkGLArea context cleanup failed: original context not current");
++                return false;
 +            }
 +            // The cover must re-appear whenever the current GLArea contents are
 +            // no longer guaranteed to be a valid frame for the active media.
@@ -5332,7 +5777,10 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +            if let Some(player) = self.player.borrow_mut().as_mut() {
 +                player.free_render_context_current();
 +            }
++            self.retained_gl_context.borrow_mut().take();
++            self.retained_frame_generation.set(None);
 +            self.cover_presentation("render-context-freed");
++            true
 +        }
 +
 +        // ---------------------------------------------------------------
@@ -5887,7 +6335,7 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +            // point, which is exactly why the render context used to be created
 +            // lazily inside the first render callback and the L218 pump could
 +            // deadlock waiting for a context that nothing would create.
-+            if self.video_surface.is_realized() {
++            if self.current_surface().is_realized() {
 +                self.bootstrap_render_context();
 +            }
 +            let identity = self
@@ -5912,6 +6360,9 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +        }
 +
 +        pub(super) fn begin_recovery(&self, request: RecoveryRequest) {
++            if self.recovery_started_at.get().is_none() {
++                self.recovery_started_at.set(Some(std::time::Instant::now()));
++            }
 +            *self.terminal_error.borrow_mut() = None;
 +            if self.recovery_snapshot.borrow().is_none() {
 +                *self.recovery_snapshot.borrow_mut() = Some(request.snapshot.clone());
@@ -6009,7 +6460,10 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +            // then lets a later attempt succeed, which is the only way to prove
 +            // "first resolver failure followed by bounded retry success" as a
 +            // distinct gate from Manual Retry. Both are absent in production.
-+            let force_resolver_failure = if self.recovery_resolve_fail_armed.get() {
++            let force_resolver_failure = if std::env::var("PIPELINE_SANTOS_RECOVERY_FAULT_RESOLVE_FAIL")
++                .as_deref() == Ok("1") && !self.recovery_fault_consumed.get() {
++                true
++            } else if self.recovery_resolve_fail_armed.get() {
 +                let count = self.recovery_resolve_fail_remaining.get().saturating_sub(1);
 +                self.recovery_resolve_fail_remaining.set(count);
 +                self.recovery_resolve_fail_armed.set(count > 0);
@@ -6019,6 +6473,9 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +            };
 +            let resolver = (!force_resolver_failure)
 +                .then(|| crate::tspawn!(crate::player::resolve_video(request)));
++            if let Some(resolver) = resolver.as_ref() {
++                *self.resolver_abort.borrow_mut() = Some(resolver.abort_handle());
++            }
 +            let obj = self.obj();
 +            gspawn!(clone!(
 +                #[weak]
@@ -6040,6 +6497,7 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +                        return;
 +                    }
 +                    imp.recovery_in_flight.set(false);
++                    imp.resolver_abort.borrow_mut().take();
 +                    match result {
 +                        Ok(stream) => {
 +                            log::info!(
@@ -6125,6 +6583,7 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +                player.acknowledge_recovery_sustained();
 +            }
 +            self.recovery_attempts.set(0);
++            self.recovery_started_at.set(None);
 +            *self.recovery_snapshot.borrow_mut() = None;
 +            *self.retry_snapshot.borrow_mut() = None;
 +            log::info!("Pipeline recovery controller reset budget after sustained playback");
@@ -6259,6 +6718,10 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +                self.state_value.set(player.state);
 +                self.obj().notify_state();
 +            }
++            // A bottom-card page is already unrealized, so neither dismiss nor
++            // window close can depend on another unrealize signal for cleanup.
++            // Stop media first, then release using its exact retained GL context.
++            self.release_render_context(&self.current_surface());
 +        }
 +
 +        pub(super) fn finished(&self) -> bool {
@@ -6266,6 +6729,17 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +                self.state_value.get(),
 +                PlaybackState::Stopped | PlaybackState::Ended | PlaybackState::Error
 +            ) || (self.duration.get() > 0.0 && self.position.get() >= self.duration.get() - 0.25)
++        }
++
++        pub(super) fn test_log_background(&self) {
++            if let Some(player) = self.player.borrow().as_ref() {
++                log::info!(
++                    "Pipeline background test state={:?} page_state={:?} position={:.3} duration={:.3} generation={} mapped={} render_context={} frame_visible={} play_sensitive={}",
++                    player.state, self.obj().state(), player.position, player.duration, player.media_generation(),
++                    self.obj().is_mapped(), player.has_render_context(), self.frame_visible.get(),
++                    self.control_play.borrow().as_ref().is_some_and(|button| button.is_sensitive()),
++                );
++            }
 +        }
 +
 +        pub(super) fn seek_by(&self, seconds: f64) {
@@ -6344,7 +6818,7 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +                // must keep running.
 +                return self.obj().is_mapped();
 +            }
-+            self.obj().is_mapped() && self.video_surface.is_mapped()
++            self.obj().is_mapped() && self.current_surface().is_mapped()
 +        }
 +
 +        /// Toggle fullscreen.
@@ -6391,6 +6865,7 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +                // immediately, so stale or uninitialized GLArea contents can
 +                // never become user-visible.
 +                if outcome.new_frame_confirmed {
++                    self.retained_frame_generation.set(None);
 +                    self.confirm_presentation_frame();
 +                    // This same render callback is ALSO a frame boundary. Both
 +                    // facts are true simultaneously and must be recorded
@@ -6442,6 +6917,10 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +        /// boundary is guaranteed to happen even if no further video frame
 +        /// arrives.
 +        fn confirm_presentation_frame(&self) {
++            // A revealed valid surface needs no per-frame presentation-state
++            // reset, log or extra pump. Only a fresh/frozen generation advances
++            // the bounded reveal state machine.
++            if self.frame_visible.get() && !self.presentation_frozen.get() { return; }
 +            let was = self
 +                .presentation_state
 +                .replace(PresentationState::FrameConfirmed);
@@ -6668,6 +7147,9 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +        }
 +
 +        fn cover_presentation(&self, reason: &str) {
++            if reason != "render-gate-closed" {
++                self.retained_frame_generation.set(None);
++            }
 +            // "Ensure covered" is a state ASSERTION, not an action. The render
 +            // callback reaches this on every render whose gate is closed, and
 +            // `render_mpv` has no new frame to confirm on most of them. Doing
@@ -6704,6 +7186,16 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +        }
 +
 +        fn poll_player(&self) {
++            if crate::recovery_policy::deadline_expired(self.recovery_started_at.get(), std::time::Instant::now()) {
++                let message = "Playback recovery exceeded its 45-second deadline".to_string();
++                // Abort owned resolver work, invalidate stale completions and
++                // retain retry_snapshot for one explicit future Manual Retry.
++                if let Some(task) = self.resolver_abort.borrow_mut().take() { task.abort(); }
++                self.resolution_generation.set(self.resolution_generation.get().wrapping_add(1));
++                if let Some(player) = self.player.borrow_mut().as_mut() { player.fail_recovery(message.clone()); }
++                self.recovery_snapshot.borrow_mut().take();
++                self.set_player_error(message);
++            }
 +            if self.external_mode.get() {
 +                // The external backend owns no GtkGLArea, no render pump and no
 +                // libmpv handle: one snapshot read plus recovery bookkeeping.
@@ -6716,6 +7208,18 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +            // queueing for an unmapped page; those operations otherwise steal
 +            // the GTK main context from search and thumbnail work.
 +            let active = self.page_is_active();
++            if active {
++                if let Some(player) = self.player.borrow().as_ref() {
++                    let evidence = player.quality_evidence();
++                    if *self.last_quality_evidence.borrow() != *evidence {
++                        if let Some(label) = self.control_quality.borrow().as_ref() {
++                            label.set_text(&evidence.description());
++                            label.set_visible(evidence.decoded_height > 0);
++                        }
++                        *self.last_quality_evidence.borrow_mut() = evidence.clone();
++                    }
++                }
++            }
 +            if self.last_active.replace(active) != active {
 +                log::debug!("VideoPage mapped state changed: {active}");
 +            }
@@ -6724,8 +7228,21 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +                    .player
 +                    .borrow_mut()
 +                    .as_mut()
-+                    .map(|player| player.poll_events_only());
-+                if let Some((recovery_request, recovery_sustained)) = events {
++                    .map(|player| {
++                        let (request, sustained) = player.poll_events_only();
++                        (request, sustained, player.state, player.position, player.duration)
++                    });
++                if let Some((recovery_request, recovery_sustained, state, position, duration)) = events {
++                    if self.state_value.replace(state) != state { self.obj().notify_state(); }
++                    // Keep the card's controls/clock current without repainting
++                    // a hidden GLArea or running foreground metrics/property work.
++                    if (self.position.get() - position).abs() >= 1.0
++                        || (state == PlaybackState::Ended && self.position.get() != position) {
++                        self.position.set(position); self.obj().notify_position();
++                    }
++                    if (self.duration.get() - duration).abs() >= 0.05 {
++                        self.duration.set(duration); self.obj().notify_duration();
++                    }
 +                    if let Some(request) = recovery_request {
 +                        self.begin_recovery(request);
 +                    }
@@ -6879,30 +7396,17 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 -                obj.emit_by_name::<()>("display-channel", &[&channel]);
 +            if let Some(request) = recovery_request {
 +                self.begin_recovery(request);
-             }
--        }
--
--        #[template_callback]
--        fn toggle_fullscreen(&self) {
--            let obj = self.obj();
--            obj.set_fullscreened(!obj.fullscreened());
--        }
--
--        #[template_callback]
--        fn download(&self) {
--            let obj = self.obj();
--            if let Some(video) = obj.video() {
--                obj.emit_by_name::<()>("download-video", &[&video]);
++            }
 +            if recovery_sustained {
 +                self.acknowledge_recovery_progress();
              }
 -        }
  
 -        #[template_callback]
--        fn remove_downloaded(&self) {
+-        fn toggle_fullscreen(&self) {
 -            let obj = self.obj();
--            if let Some(video) = obj.video() {
--                obj.emit_by_name::<()>("remove-downloaded", &[&video]);
+-            obj.set_fullscreened(!obj.fullscreened());
+-        }
 +            let old_state = self.state_value.replace(state);
 +            let old_position = self.position.replace(position);
 +            let old_duration = self.duration.replace(duration);
@@ -6922,14 +7426,13 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +            }
 +            if old_muted != muted {
 +                self.obj().notify_muted();
-             }
--        }
++            }
  
 -        #[template_callback]
--        fn play_external(&self) {
+-        fn download(&self) {
 -            let obj = self.obj();
--            obj.play_external();
--        }
+-            if let Some(video) = obj.video() {
+-                obj.emit_by_name::<()>("download-video", &[&video]);
 +            // The status label must describe the real state. A renderer/GL
 +            // failure must never be shown as "Reconnecting playback…", and
 +            // "Reconnecting…" is only correct while a genuine recovery is in
@@ -6968,13 +7471,14 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +                    }
 +                    None => label.set_visible(false),
 +                }
-+            }
+             }
+-        }
  
 -        #[template_callback]
--        fn copy_to_clipboard(&self) {
+-        fn remove_downloaded(&self) {
 -            let obj = self.obj();
 -            if let Some(video) = obj.video() {
--                obj.emit_by_name::<()>("copy-video-url-to-clipboard", &[&video]);
+-                obj.emit_by_name::<()>("remove-downloaded", &[&video]);
 +            self.updating_controls.set(true);
 +            if let Some(play) = self.control_play.borrow().as_ref() {
 +                play.set_icon_name(match state {
@@ -7000,7 +7504,7 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +                };
 +                position_scale.set_value(fraction);
 +                position_scale.set_sensitive(duration > 0.0);
-             }
++            }
 +            if let Some(volume_scale) = self.control_volume.borrow().as_ref() {
 +                volume_scale.set_value(if muted { 0.0 } else { volume });
 +            }
@@ -7010,16 +7514,15 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +                    super::format_time(position),
 +                    super::format_time(duration)
 +                ));
-+            }
+             }
 +            self.updating_controls.set(false);
          }
  
--        fn setup_actions(&self) {
+-        #[template_callback]
+-        fn play_external(&self) {
 +        fn create_controls(&self) {
              let obj = self.obj();
--
--            let action_play_pause = SimpleAction::new("play-pause", None);
--            action_play_pause.connect_activate(clone!(
+-            obj.play_external();
 +            let controls = gtk::Box::new(gtk::Orientation::Horizontal, 6);
 +            controls.add_css_class("player-controls");
 +            controls.set_halign(Align::End);
@@ -7033,16 +7536,11 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +            play.add_css_class("flat");
 +            play.set_tooltip_text(Some("Play or pause"));
 +            play.connect_clicked(clone!(
-                 #[weak]
-                 obj,
--                move |_, _| {
--                    obj.play_pause();
--                }
++                #[weak]
++                obj,
 +                #[upgrade_or_default]
 +                move |_| obj.play_pause()
-             ));
--            let action_seek_forward = SimpleAction::new("seek-forward", None);
--            action_seek_forward.connect_activate(clone!(
++            ));
 +            controls.append(&play);
 +            *self.control_play.borrow_mut() = Some(play);
 +
@@ -7051,21 +7549,11 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +            backward.add_css_class("flat");
 +            backward.set_tooltip_text(Some("Back 10 seconds"));
 +            backward.connect_clicked(clone!(
-                 #[weak]
-                 obj,
--                move |_, _| {
--                    // TODO: Maybe configurable duration.
--                    obj.seek_by(10.0);
--                    obj.imp()
--                        .billboard
--                        .post_message("media-seek-forward", &gettextrs::gettext("10 Seconds"));
--                }
++                #[weak]
++                obj,
 +                #[upgrade_or_default]
 +                move |_| obj.seek_by(-10.0)
-             ));
--
--            let action_seek_backward = SimpleAction::new("seek-backward", None);
--            action_seek_backward.connect_activate(clone!(
++            ));
 +            controls.append(&backward);
 +
 +            let position = Scale::with_range(gtk::Orientation::Horizontal, 0.0, 1.0, 0.001);
@@ -7074,21 +7562,15 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +            position.set_draw_value(false);
 +            position.set_value(0.0);
 +            position.connect_value_changed(clone!(
-                 #[weak]
-                 obj,
--                move |_, _| {
--                    // TODO: Maybe configurable duration.
--                    obj.seek_by(-10.0);
--                    obj.imp()
--                        .billboard
--                        .post_message("media-seek-backward", &gettextrs::gettext("10 Seconds"));
++                #[weak]
++                obj,
 +                #[upgrade_or_default]
 +                move |scale| {
 +                    if !obj.imp().updating_controls.get() {
 +                        obj.seek_to_percent(scale.value());
 +                    }
-                 }
-             ));
++                }
++            ));
 +            controls.append(&position);
 +            *self.control_position.borrow_mut() = Some(position);
 +
@@ -7121,20 +7603,14 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +                move |_| obj.imp().toggle_muted()
 +            ));
 +            controls.append(&mute);
- 
--            let action_seek_percentile =
--                SimpleAction::new("seek-percentile", Some(&i32::static_variant_type()));
--            action_seek_percentile.connect_activate(clone!(
++
 +            let volume = Scale::with_range(gtk::Orientation::Horizontal, 0.0, 1.0, 0.01);
 +            volume.set_width_request(90);
 +            volume.set_draw_value(false);
 +            volume.set_value(self.settings.double("player-volume"));
 +            volume.connect_value_changed(clone!(
-                 #[weak]
-                 obj,
--                move |_, parameter| {
--                    let parameter: i32 = parameter.unwrap().get().unwrap();
--                    obj.seek_to_percent((parameter as f64) / 10.0)
++                #[weak]
++                obj,
 +                #[upgrade_or_default]
 +                move |scale| {
 +                    if !obj.imp().updating_controls.get() {
@@ -7143,8 +7619,8 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +                            player.set_muted(false);
 +                        }
 +                    }
-                 }
-             ));
++                }
++            ));
 +            controls.append(&volume);
 +            *self.control_volume.borrow_mut() = Some(volume);
 +
@@ -7173,13 +7649,40 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +            status.set_visible(false);
 +            self.video_overlay.add_overlay(&status);
 +            *self.control_status.borrow_mut() = Some(status);
-+        }
 +
++            // Persistent input/decode/viewport information, not a hover-only
++            // quality hint or a false "720p" label on an upscaled 360p source.
++            let quality = Label::new(None);
++            quality.add_css_class("player-status");
++            quality.set_halign(Align::End);
++            quality.set_valign(Align::Start);
++            quality.set_margin_top(12);
++            quality.set_margin_start(12);
++            quality.set_margin_end(12);
++            quality.set_can_target(false);
++            quality.set_visible(false);
++            self.video_overlay.add_overlay(&quality);
++            *self.control_quality.borrow_mut() = Some(quality);
+         }
+ 
+-        #[template_callback]
+-        fn copy_to_clipboard(&self) {
+-            let obj = self.obj();
+-            if let Some(video) = obj.video() {
+-                obj.emit_by_name::<()>("copy-video-url-to-clipboard", &[&video]);
+-            }
 +        #[allow(deprecated)]
 +        fn setup(&self) {
-+            let obj = self.obj();
++            self.setup_surface(false);
+         }
  
--            self.clapper.connect_seek_request(clone!(
+-        fn setup_actions(&self) {
++        #[allow(deprecated)]
++        fn setup_surface(&self, retry: bool) {
+             let obj = self.obj();
+ 
+-            let action_play_pause = SimpleAction::new("play-pause", None);
+-            action_play_pause.connect_activate(clone!(
 +            // Latch the backend exactly once. The external candidate must not
 +            // construct or use the embedded video renderer for a playback
 +            // generation, so every GLArea hook below is skipped and the widget
@@ -7187,7 +7690,7 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +            // and no GL context is ever created on this path.
 +            if external_backend() {
 +                self.external_mode.set(true);
-+                self.video_surface.get().set_visible(false);
++                self.current_surface().set_visible(false);
 +                self.video_overlay.get().set_visible(false);
 +                log::info!(
 +                    "Pipeline lifecycle stage=player-backend selected=external \
@@ -7198,7 +7701,7 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +            }
 +            log::info!("Pipeline lifecycle stage=player-backend selected=embedded");
 +
-+            let area = self.video_surface.get();
++            let area = self.current_surface();
 +            // libmpv drives presentation through queue_render() only when a
 +            // decoded frame is available. Automatic snapshots would rebuild
 +            // and export a GL texture at the display refresh rate even while
@@ -7240,22 +7743,14 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +            let resize_handler = area.connect_resize(clone!(
                  #[weak]
                  obj,
--                move |_, forward| {
--                    // TODO: Maybe configurable duration.
--                    if forward {
--                        obj.seek_by(10.);
--                        obj.imp()
--                            .billboard
--                            .post_message("media-seek-forward", &gettextrs::gettext("10 Seconds"));
--                    } else {
--                        obj.seek_by(-10.);
--                        obj.imp()
--                            .billboard
--                            .post_message("media-seek-backward", &gettextrs::gettext("10 Seconds"));
--                    }
+-                move |_, _| {
+-                    obj.play_pause();
+-                }
 +                #[upgrade_or_default]
 +                move |_, _, _| obj.imp().request_render()
-+            ));
+             ));
+-            let action_seek_forward = SimpleAction::new("seek-forward", None);
+-            action_seek_forward.connect_activate(clone!(
 +            *self.resize_handler.borrow_mut() = Some(resize_handler);
 +            // Capture GtkGLArea GL-context creation at REALIZE time. Previously
 +            // the only GL diagnostic was at unrealize, so a GLArea that could
@@ -7264,26 +7759,91 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +            // GDK error string is logged verbatim so the failing stage is
 +            // identifiable (GLArea realize vs make_current vs
 +            // mpv_render_context_create vs the Santos EGL path).
++            let create_context_handler = area.connect_create_context(clone!(
+                 #[weak]
+                 obj,
+-                move |_, _| {
+-                    // TODO: Maybe configurable duration.
+-                    obj.seek_by(10.0);
+-                    obj.imp()
+-                        .billboard
+-                        .post_message("media-seek-forward", &gettextrs::gettext("10 Seconds"));
++                #[upgrade_or_default]
++                move |_| {
++                    let context = obj.imp().retained_gl_context.borrow().clone();
++                    context
+                 }
+             ));
+-
+-            let action_seek_backward = SimpleAction::new("seek-backward", None);
+-            action_seek_backward.connect_activate(clone!(
++            *self.create_context_handler.borrow_mut() = Some(create_context_handler);
 +            let realize_handler = area.connect_realize(clone!(
-+                #[weak]
-+                obj,
+                 #[weak]
+                 obj,
+-                move |_, _| {
+-                    // TODO: Maybe configurable duration.
+-                    obj.seek_by(-10.0);
+-                    obj.imp()
+-                        .billboard
+-                        .post_message("media-seek-backward", &gettextrs::gettext("10 Seconds"));
+-                }
 +                #[upgrade_or_default]
 +                move |area| obj.imp().on_glarea_realize(area)
-+            ));
+             ));
+-
+-            let action_seek_percentile =
+-                SimpleAction::new("seek-percentile", Some(&i32::static_variant_type()));
+-            action_seek_percentile.connect_activate(clone!(
 +            *self.realize_handler.borrow_mut() = Some(realize_handler);
 +            let map_handler = area.connect_map(clone!(
-+                #[weak]
-+                obj,
+                 #[weak]
+                 obj,
+-                move |_, parameter| {
+-                    let parameter: i32 = parameter.unwrap().get().unwrap();
+-                    obj.seek_to_percent((parameter as f64) / 10.0)
+-                }
 +                #[upgrade_or_default]
 +                move |area| obj.imp().on_glarea_mapped(area)
-+            ));
+             ));
+-
+-            self.clapper.connect_seek_request(clone!(
 +            *self.map_handler.borrow_mut() = Some(map_handler);
 +            let unrealize_handler = area.connect_unrealize(clone!(
-+                #[weak]
-+                obj,
+                 #[weak]
+                 obj,
+-                move |_, forward| {
+-                    // TODO: Maybe configurable duration.
+-                    if forward {
+-                        obj.seek_by(10.);
+-                        obj.imp()
+-                            .billboard
+-                            .post_message("media-seek-forward", &gettextrs::gettext("10 Seconds"));
 +                #[upgrade_or_default]
-+                move |area| obj.imp().release_render_context(area)
-+            ));
++                move |area| {
++                    // Navigation removes retained pages from the widget tree
++                    // when minimizing to the bottom bar. Hold the SAME GDK/mpv
++                    // contexts: freeing libmpv's renderer also kills its video
++                    // output. GTK owns and releases only its FBO/textures here.
++                    let imp = obj.imp();
++                    let retained = imp.player.borrow().as_ref().and_then(|player| {
++                        (player.has_render_context() && !matches!(player.state,
++                            PlaybackState::Stopped | PlaybackState::Ended | PlaybackState::Error))
++                            .then(|| player.first_frame_presented().then_some(player.media_generation()))
++                    });
++                    if let Some(generation) = retained {
++                        imp.cover_presentation("navigation-surface-unrealized");
++                        imp.retained_frame_generation.set(generation);
++                        log::info!("Pipeline lifecycle stage=glarea-unrealized media_retained=true");
+                     } else {
+-                        obj.seek_by(-10.);
+-                        obj.imp()
+-                            .billboard
+-                            .post_message("media-seek-backward", &gettextrs::gettext("10 Seconds"));
++                        imp.release_render_context(area);
+                     }
+                 }
+             ));
 +            *self.unrealize_handler.borrow_mut() = Some(unrealize_handler);
 +            let render_handler = area.connect_render(clone!(
 +                #[weak]
@@ -7292,9 +7852,10 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +                move |area, _context| {
 +                    obj.imp().render_mpv(area);
 +                    Propagation::Proceed
-                 }
-             ));
++                }
++            ));
 +            *self.render_handler.borrow_mut() = Some(render_handler);
++            if retry { return; }
 +
 +            // Opaque presentation cover. It must be a DIRECT GtkOverlay child
 +            // that fills the overlay allocation.
@@ -7328,7 +7889,7 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +            // only for the first few samples, then reduced.
 +            {
 +                let cover = cover.clone();
-+                let video_surface = self.video_surface.clone();
++                let video_surface = self.current_surface();
 +                let samples = std::cell::Cell::new(0u32);
 +                cover.connect_map(move |cover| {
 +                    if samples.get() >= 6 {
@@ -7443,7 +8004,7 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
                      #[weak]
                      obj,
                      #[upgrade_or_panic]
-@@ -570,7 +2937,7 @@ pub mod imp {
+@@ -570,7 +3151,7 @@ pub mod imp {
                      ShortcutTrigger::parse_string("F|F11")
                          .expect("F|F11 to be a valid shortcut trigger"),
                  ),
@@ -7452,7 +8013,7 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
                      #[weak]
                      obj,
                      #[upgrade_or_panic]
-@@ -580,111 +2947,124 @@ pub mod imp {
+@@ -580,111 +3161,124 @@ pub mod imp {
                      }
                  ))),
              );
@@ -7552,13 +8113,13 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +                move |_, _| obj.seek_by(-10.0)
              ));
 +            actions.add_action(&action_seek_backward);
-+
+ 
+-            player.connect_position_notify(clone!(
 +            // Numeric percentile shortcuts were removed from the Blueprint:
 +            // GTK 4.22 on this device could dispatch a null `(so)` payload and
 +            // abort the application. The visible seek controls and Left/Right
 +            // actions retain the supported seek behavior.
- 
--            player.connect_position_notify(clone!(
++
 +            for (name, delta) in [("volume-up", 0.05), ("volume-down", -0.05)] {
 +                let action = SimpleAction::new(name, None);
 +                action.connect_activate(clone!(
@@ -7607,11 +8168,19 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 -                );
 +            obj.insert_action_group("video", Some(&actions));
 +        }
- 
--            self.watch.replace(Some(watch));
++
 +        #[template_callback(function)]
 +        fn format_uploaded(uploaded: String) -> String {
 +            gettextrs::gettext("Uploaded {}").replace("{}", &uploaded)
++        }
+ 
+-            self.watch.replace(Some(watch));
++        #[template_callback]
++        fn display_channel(&self) {
++            let obj = self.obj();
++            if let Some(channel) = obj.video().map(|v| v.uploader()) {
++                obj.emit_by_name::<()>("display-channel", &[&channel]);
++            }
 +        }
  
 -            // Set initial bit rate from last observed bit rate.
@@ -7624,14 +8193,6 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 -                    "adaptive-start-bitrate",
 -                )
 -                .build();
-+        #[template_callback]
-+        fn display_channel(&self) {
-+            let obj = self.obj();
-+            if let Some(channel) = obj.video().map(|v| v.uploader()) {
-+                obj.emit_by_name::<()>("display-channel", &[&channel]);
-+            }
-+        }
-+
 +        #[template_callback]
 +        fn download(&self) {
 +            let obj = self.obj();
@@ -7657,7 +8218,7 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
          }
      }
  
-@@ -695,8 +3075,6 @@ pub mod imp {
+@@ -695,8 +3289,6 @@ pub mod imp {
          type ParentType = adw::Bin;
  
          fn class_init(klass: &mut Self::Class) {
@@ -7666,12 +8227,13 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
              Self::bind_template(klass);
              Self::bind_template_callbacks(klass);
              Utility::bind_template_callbacks(klass);
-@@ -736,16 +3114,67 @@ pub mod imp {
+@@ -736,16 +3328,71 @@ pub mod imp {
          }
  
          fn dispose(&self) {
 -            if let Some(watch) = self.watch.borrow().as_ref() {
 -                watch.unwatch();
++            if let Some(task) = self.resolver_abort.borrow_mut().take() { task.abort(); }
 +            self.resolution_generation
 +                .set(self.resolution_generation.get().wrapping_add(1));
 +            if let Some(source) = self.recovery_backoff_source.borrow_mut().take() {
@@ -7682,7 +8244,7 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +            if let Some(source) = self.poll_source.borrow_mut().take() {
 +                source.remove();
 +            }
-+            let area = self.video_surface.get();
++            let area = self.current_surface();
 +            area.set_auto_render(false);
 +            if let Some(player) = self.player.borrow_mut().as_mut() {
 +                player.stop();
@@ -7705,6 +8267,9 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +            if let Some(handler) = self.unrealize_handler.borrow_mut().take() {
 +                area.disconnect(handler);
 +            }
++            if let Some(handler) = self.create_context_handler.borrow_mut().take() {
++                area.disconnect(handler);
++            }
 +            if let Some(player) = self.player.borrow_mut().take() {
 +                if player.has_render_context() {
 +                    log::error!(
@@ -7719,7 +8284,7 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
      impl WidgetImpl for VideoPage {
          fn grab_focus(&self) -> bool {
 -            self.clapper.grab_focus()
-+            self.video_surface.grab_focus()
++            self.current_surface().grab_focus()
          }
      }
 +
@@ -7738,7 +8303,7 @@ index dfb7dfb164f705b8d13bfc7ebb5e9f6972458f03..6f4e25483d6f8b6e4423eb3c11d9d4ba
 +    }
 +}
 diff --git a/src/gui/window.rs b/src/gui/window.rs
-index 3896a2dd1fbf70cb264c6037a054dafea567bb43..1d60f26b257e1478078ee5e4d1e0b5e26b94f3e4 100644
+index 3896a2dd1fbf70cb264c6037a054dafea567bb43..64479d588ca28d33e7460d602bee3ff90ade46ed 100644
 --- a/src/gui/window.rs
 +++ b/src/gui/window.rs
 @@ -1,10 +1,11 @@
@@ -7798,7 +8363,7 @@ index 3896a2dd1fbf70cb264c6037a054dafea567bb43..1d60f26b257e1478078ee5e4d1e0b5e2
  
          lines.join("\n")
      }
-@@ -183,6 +173,41 @@ impl Window {
+@@ -183,6 +173,53 @@ impl Window {
      pub fn show_toast(&self, toast: Toast) {
          self.imp().toast_overlay.add_toast(toast);
      }
@@ -7837,10 +8402,22 @@ index 3896a2dd1fbf70cb264c6037a054dafea567bb43..1d60f26b257e1478078ee5e4d1e0b5e2
 +            video_page.seek_by(seconds);
 +        }
 +    }
++
++    pub fn test_renderer_retry(&self) {
++        if let Some(video_page) = self.imp().visible_video_page() { video_page.retry(); }
++    }
++
++    pub fn test_background_action(&self, action: &str) {
++        self.imp().test_background_action(action);
++    }
++
++    pub fn test_log_background(&self) {
++        self.imp().test_log_background();
++    }
  }
  
  pub mod imp {
-@@ -242,7 +267,7 @@ pub mod imp {
+@@ -242,7 +279,7 @@ pub mod imp {
      #[template(resource = "/ui/window.ui")]
      pub struct Window {
          #[template_child]
@@ -7849,7 +8426,7 @@ index 3896a2dd1fbf70cb264c6037a054dafea567bb43..1d60f26b257e1478078ee5e4d1e0b5e2
          #[template_child]
          sidebar_list: TemplateChild<ListBox>,
  
-@@ -261,7 +286,7 @@ pub mod imp {
+@@ -261,7 +298,7 @@ pub mod imp {
          video_list: TemplateChild<VideoList>,
  
          #[template_child]
@@ -7858,7 +8435,7 @@ index 3896a2dd1fbf70cb264c6037a054dafea567bb43..1d60f26b257e1478078ee5e4d1e0b5e2
          #[template_child]
          search_list: TemplateChild<SearchList>,
          #[template_child]
-@@ -310,6 +335,12 @@ pub mod imp {
+@@ -310,6 +347,13 @@ pub mod imp {
          watch_history_enabled: Cell<bool>,
  
          pub settings: gtk::gio::Settings,
@@ -7868,19 +8445,54 @@ index 3896a2dd1fbf70cb264c6037a054dafea567bb43..1d60f26b257e1478078ee5e4d1e0b5e2
 +        /// Set once a frame has actually been painted. This is the `first-paint`
 +        /// acceptance boundary, and it is deliberately separate from `data-ready`.
 +        first_paint_done: Cell<bool>,
++        search_generation: Cell<u64>,
      }
  
      impl Default for Window {
-@@ -338,6 +369,8 @@ pub mod imp {
+@@ -338,6 +382,9 @@ pub mod imp {
                  errors: Default::default(),
  
                  settings: gtk::gio::Settings::new(BASE_ID),
 +                first_paint_armed: RefCell::new(false),
 +                first_paint_done: Cell::new(false),
++                search_generation: Cell::new(0),
  
                  split_view_collapsed_before_fullscreen: Default::default(),
                  breakpoint_collapsed: Default::default(),
-@@ -400,7 +433,7 @@ pub mod imp {
+@@ -354,6 +401,32 @@ pub mod imp {
+ 
+     #[gtk::template_callbacks]
+     impl Window {
++        pub(super) fn test_background_action(&self, action: &str) {
++            let obj = self.obj();
++            match action {
++                "minimize" => { self.main_navigation.pop(); }
++                "expand" => {
++                    if obj.video_page_for_bottom_bar().is_some() { self.bottom_bar_clicked(); }
++                }
++                "toggle" => {
++                    if obj.video_page_for_bottom_bar().is_some() { self.bottom_bar_play_pause(); }
++                    else { obj.test_play_pause(); }
++                }
++                "dismiss" => self.bottom_bar_dismissed(),
++                "close" => obj.close(),
++                _ => {}
++            }
++            log::info!("Pipeline background test action={action}");
++        }
++
++        pub(super) fn test_log_background(&self) {
++            let page = self.visible_video_page().or_else(|| {
++                self.obj().video_page_for_bottom_bar().and_then(|p| p.child()).and_dynamic_cast::<VideoPage>().ok()
++            });
++            if let Some(page) = page { page.test_log_background(); }
++            else { log::info!("Pipeline background test page=none"); }
++        }
++
+         #[template_callback(function)]
+         fn feed_visible(page: Option<&str>) -> bool {
+             page == Some("feed")
+@@ -400,7 +473,7 @@ pub mod imp {
                  .expect("There is a video page in the bottom bar if it was clicked");
  
              // If it already was in the navigation view, remove it as it cannot be added multiple times.
@@ -7889,7 +8501,7 @@ index 3896a2dd1fbf70cb264c6037a054dafea567bb43..1d60f26b257e1478078ee5e4d1e0b5e2
              let current_pages = self
                  .main_navigation
                  .navigation_stack()
-@@ -437,7 +470,7 @@ pub mod imp {
+@@ -437,7 +510,7 @@ pub mod imp {
                  .and_then(|p| p.child())
                  .and_dynamic_cast_ref::<VideoPage>()
              {
@@ -7898,7 +8510,7 @@ index 3896a2dd1fbf70cb264c6037a054dafea567bb43..1d60f26b257e1478078ee5e4d1e0b5e2
                  obj.set_video_page_for_bottom_bar(None::<NavigationPage>);
              }
          }
-@@ -455,12 +488,13 @@ pub mod imp {
+@@ -455,12 +528,13 @@ pub mod imp {
          }
  
          #[template_callback]
@@ -7916,7 +8528,7 @@ index 3896a2dd1fbf70cb264c6037a054dafea567bb43..1d60f26b257e1478078ee5e4d1e0b5e2
  
              // If the same video is already playing from the bottom bar, expand it instead of starting the video again.
              if obj
-@@ -482,7 +516,7 @@ pub mod imp {
+@@ -482,10 +556,18 @@ pub mod imp {
                  .and_then(|p| p.child())
                  .and_dynamic_cast_ref::<VideoPage>()
              {
@@ -7925,7 +8537,18 @@ index 3896a2dd1fbf70cb264c6037a054dafea567bb43..1d60f26b257e1478078ee5e4d1e0b5e2
                  obj.set_video_page_for_bottom_bar(None::<NavigationPage>);
              }
  
-@@ -753,7 +787,7 @@ pub mod imp {
++            // A visible VideoPage is not necessarily the bottom-bar owner.
++            // Stop/cancel it before pushing another page; otherwise its pending
++            // recovery can reopen the old video behind the replacement.
++            if let Some(page) = self.visible_video_page() {
++                page.stop();
++                log::info!("Pipeline lifecycle stage=visible-video-replaced prior_media_stopped=true");
++            }
++
+             let video_page = VideoPage::new(&video, &obj.client());
+             let page = NavigationPage::new(&video_page, &video.title());
+             self.main_navigation_pre_push();
+@@ -753,7 +835,7 @@ pub mod imp {
              obj.show_toast(toast);
          }
  
@@ -7934,16 +8557,29 @@ index 3896a2dd1fbf70cb264c6037a054dafea567bb43..1d60f26b257e1478078ee5e4d1e0b5e2
              let page = self.main_navigation.visible_page();
              let child = page.and_then(|p| p.child());
              child.and_dynamic_cast::<VideoPage>().ok()
-@@ -780,7 +814,7 @@ pub mod imp {
+@@ -780,20 +862,26 @@ pub mod imp {
          }
  
          #[template_callback]
 -        fn search(&self) {
 +        pub(super) fn search(&self) {
++            let text = self.search_entry.text().to_string();
++            if text.trim().is_empty() { return; }
++            let generation = self.search_generation.get().wrapping_add(1);
++            self.search_generation.set(generation);
              gspawn!(clone!(
                  #[weak(rename_to = obj)]
                  self.obj(),
-@@ -793,7 +827,7 @@ pub mod imp {
+                 async move {
+                     let s = obj.imp();
+-                    let text = s.search_entry.text();
+-                    s.search_list.set_model(obj.client().search(&text).await);
++                    let model = obj.client().search(&text).await;
++                    if s.search_generation.get() == generation {
++                        s.search_list.set_model(model);
++                    }
+                 }
+             ));
          }
  
          #[template_callback]
@@ -7952,7 +8588,7 @@ index 3896a2dd1fbf70cb264c6037a054dafea567bb43..1d60f26b257e1478078ee5e4d1e0b5e2
              let is_search_page = self.main_stack.visible_child_name() == Some("search".into());
              let is_feed_page = self.main_stack.visible_child_name() == Some("feed".into());
  
-@@ -966,10 +1000,6 @@ pub mod imp {
+@@ -966,10 +1054,6 @@ pub mod imp {
  
                      let all_arguments = {
                          let mut v = vec![];
@@ -7963,7 +8599,7 @@ index 3896a2dd1fbf70cb264c6037a054dafea567bb43..1d60f26b257e1478078ee5e4d1e0b5e2
                          v.push("-P".into());
                          v.push(download_dir);
                          v.push("-f".into());
-@@ -1458,6 +1488,10 @@ pub mod imp {
+@@ -1458,6 +1542,10 @@ pub mod imp {
          }
  
          fn setup_client(&self) {
@@ -7974,7 +8610,7 @@ index 3896a2dd1fbf70cb264c6037a054dafea567bb43..1d60f26b257e1478078ee5e4d1e0b5e2
              let obj = self.obj();
              let client = obj.client();
              let res = client.setup();
-@@ -1479,6 +1513,93 @@ pub mod imp {
+@@ -1479,6 +1567,93 @@ pub mod imp {
              ));
          }
  
@@ -8068,7 +8704,7 @@ index 3896a2dd1fbf70cb264c6037a054dafea567bb43..1d60f26b257e1478078ee5e4d1e0b5e2
          fn show_privacy_notice(&self) {
              let obj = self.obj();
              let privacy_notice = PrivacyNotice::new();
-@@ -1545,15 +1666,6 @@ pub mod imp {
+@@ -1545,15 +1720,6 @@ pub mod imp {
              ));
          }
  
@@ -8084,7 +8720,7 @@ index 3896a2dd1fbf70cb264c6037a054dafea567bb43..1d60f26b257e1478078ee5e4d1e0b5e2
          fn apply_seasonal_style(&self) {
              if self.settings.boolean("seasonal-style") {
                  crate::pride::apply_seasonal_style(&self.progress_feed.get());
-@@ -1603,10 +1715,13 @@ pub mod imp {
+@@ -1603,10 +1769,13 @@ pub mod imp {
              self.setup_compute_properties();
              self.setup_filter_icon();
              self.setup_fullscreen();
@@ -8099,18 +8735,37 @@ index 3896a2dd1fbf70cb264c6037a054dafea567bb43..1d60f26b257e1478078ee5e4d1e0b5e2
  
              let obj = self.obj();
              if PROFILE == "Devel" {
+@@ -1648,6 +1817,17 @@ pub mod imp {
+                 log::warn!("Failed to save window state, {}", err);
+             }
+ 
++            // Stop media/resolvers before navigation unrealizes their surfaces.
++            // A normal navigation pop retains playback in the bottom bar, so
++            // render-surface teardown cannot own application shutdown.
++            if let Some(page) = obj.video_page_for_bottom_bar()
++                .and_then(|p| p.child()).and_dynamic_cast_ref::<VideoPage>() {
++                page.stop();
++            }
++            for page in self.main_navigation.navigation_stack().iter::<NavigationPage>().flatten() {
++                if let Some(video) = page.child().and_dynamic_cast_ref::<VideoPage>() { video.stop(); }
++            }
++
+             // In particular, this marks all videos currently in the navigation as watched.
+             self.main_navigation.pop_to_tag("root");
+ 
 diff --git a/src/main.rs b/src/main.rs
-index d7ae36d4d99cbc88dfd6872edd628304af71022b..4087f14b9cba67c364881140b612934e0ce260ec 100644
+index d7ae36d4d99cbc88dfd6872edd628304af71022b..24bfa73d4162fc14f13864aa819e14589953aeaa 100644
 --- a/src/main.rs
 +++ b/src/main.rs
-@@ -1,19 +1,23 @@
+@@ -1,19 +1,26 @@
 +use chrono::Utc;
  use gdk::{
      Display,
 -    gio::prelude::SettingsExt,
      prelude::{ApplicationExt, ApplicationExtManual},
  };
- use glib::object::IsA;
+-use glib::object::IsA;
++use glib::object::{IsA, ObjectExt};
  use gtk::{CssProvider, prelude::GtkWindowExt, prelude::RootExt};
 -use std::sync::LazyLock;
 +use std::{borrow::Cow, path::Path, sync::LazyLock, time::Duration};
@@ -8124,13 +8779,16 @@ index d7ae36d4d99cbc88dfd6872edd628304af71022b..4087f14b9cba67c364881140b612934e
  mod backend;
  mod gui;
 +mod player;
++mod stream_quality;
++mod resolver_environment;
++mod recovery_policy;
 +// Second, separable playback backend: a private native mpv process driven over
 +// JSON IPC. It does not replace `player`; `PIPELINE_SANTOS_PLAYER` selects.
 +mod external_player;
  mod pride;
  mod splashes;
  mod store;
-@@ -95,53 +99,291 @@ fn init_css() {
+@@ -95,53 +102,291 @@ fn init_css() {
      );
  }
  
@@ -8459,7 +9117,7 @@ index d7ae36d4d99cbc88dfd6872edd628304af71022b..4087f14b9cba67c364881140b612934e
  
      let app = gtk::Application::builder()
          .application_id(APP_ID)
-@@ -152,11 +394,18 @@ fn main() {
+@@ -152,11 +397,18 @@ fn main() {
  }
  
  fn build_ui(app: &gtk::Application) {
@@ -8478,7 +9136,7 @@ index d7ae36d4d99cbc88dfd6872edd628304af71022b..4087f14b9cba67c364881140b612934e
      init_icons(&window.display());
  
      glib::set_prgname(Some("tubefeeder"));
-@@ -164,4 +413,105 @@ fn build_ui(app: &gtk::Application) {
+@@ -164,4 +416,140 @@ fn build_ui(app: &gtk::Application) {
      window.set_icon_name(Some(APP_ID));
  
      window.present();
@@ -8556,6 +9214,33 @@ index d7ae36d4d99cbc88dfd6872edd628304af71022b..4087f14b9cba67c364881140b612934e
 +        });
 +    }
 +
++    // Explicit test-only real navigation/card/control actions. Normal launches
++    // never set a plan. Entries are milliseconds:action, separated by commas.
++    if let Ok(plan) = std::env::var("PIPELINE_SANTOS_TEST_BACKGROUND_PLAN")
++        && !plan.is_empty()
++    {
++        for entry in plan.split(',') {
++            let Some((delay, action)) = entry.split_once(':') else { continue };
++            let Ok(milliseconds) = delay.parse::<u64>() else { continue };
++            if !matches!(action, "minimize" | "expand" | "toggle" | "dismiss" | "close") { continue; }
++            let action = action.to_string();
++            let weak = window.downgrade();
++            glib::timeout_add_local_once(Duration::from_millis(milliseconds), move || {
++                if let Some(window) = weak.upgrade() {
++                    window.test_log_background();
++                    window.test_background_action(&action);
++                }
++            });
++        }
++        let weak = window.downgrade();
++        glib::timeout_add_local(Duration::from_millis(1000), move || {
++            let Some(window) = weak.upgrade() else { return glib::ControlFlow::Break };
++            if !gtk::prelude::WidgetExt::is_visible(&window) { return glib::ControlFlow::Break; }
++            window.test_log_background();
++            glib::ControlFlow::Continue
++        });
++    }
++
 +    // Test-only seek sequence.
 +    if let Ok(value) = std::env::var("PIPELINE_SANTOS_TEST_SEEK_AFTER_MS")
 +        && let Ok(milliseconds) = value.parse::<u64>()
@@ -8574,6 +9259,14 @@ index d7ae36d4d99cbc88dfd6872edd628304af71022b..4087f14b9cba67c364881140b612934e
 +    // Bounded lifecycle-test hook: close through the normal GTK window path so
 +    // GLArea unrealize/dispose can prove current-context render teardown. It is
 +    // inert unless explicitly supplied by a test harness.
++    if let Ok(value) = std::env::var("PIPELINE_SANTOS_TEST_RENDERER_RETRY_AFTER_MS")
++        && let Ok(milliseconds) = value.parse::<u64>() {
++        let window = window.clone();
++        glib::timeout_add_local(Duration::from_millis(milliseconds), move || {
++            window.test_renderer_retry();
++            glib::ControlFlow::Break
++        });
++    }
 +    if let Ok(value) = std::env::var("PIPELINE_SANTOS_TEST_EXIT_AFTER_MS")
 +        && let Ok(milliseconds) = value.parse::<u64>()
 +    {
@@ -8618,10 +9311,10 @@ index 5ae9129199bca257288bf540f2f31c891fdcd707..7d66038fdfcd6e68ec17d29b162836b1
    'cargo-build',
 diff --git a/src/player.rs b/src/player.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f9dded23c
+index 0000000000000000000000000000000000000000..f93fdbdcfa82e70484a5c04a7c09aae902b1020a
 --- /dev/null
 +++ b/src/player.rs
-@@ -0,0 +1,4220 @@
+@@ -0,0 +1,4287 @@
 +//! Santos playback boundary for Pipeline.
 +//!
 +//! The UI keeps the upstream Pipeline metadata/provider layer. Playback is
@@ -8644,11 +9337,12 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +    time::{Duration, Instant},
 +};
 +
-+use serde::Deserialize;
 +use tokio::process::Command;
 +use url::Url;
 +
 +use crate::backend::Video;
++pub use crate::stream_quality::ResolvedStream;
++use crate::stream_quality::{QualityEvidence, YtDlpInfo, choose_stream, format_selector, max_height};
 +
 +const MPV_FORMAT_STRING: c_int = 1;
 +const MPV_FORMAT_FLAG: c_int = 3;
@@ -8666,6 +9360,7 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +// Valid for mpv_render_context_get_info(). Semantically distinguishes a real
 +// new video frame from a redraw/repeat of the previous presentation contents.
 +const MPV_RENDER_PARAM_NEXT_FRAME_INFO: c_int = 11;
++const MPV_RENDER_PARAM_SKIP_RENDERING: c_int = 13;
 +
 +// mpv_render_frame_info_flag values (render.h).
 +const MPV_RENDER_FRAME_INFO_PRESENT: u64 = 1 << 0;
@@ -8680,6 +9375,7 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +const MPV_EVENT_FILE_LOADED: c_int = 8;
 +const MPV_EVENT_SEEK: c_int = 20;
 +const MPV_EVENT_PLAYBACK_RESTART: c_int = 21;
++const MPV_EVENT_VIDEO_RECONFIG: c_int = 17;
 +
 +const MPV_END_FILE_REASON_EOF: c_int = 0;
 +const MPV_END_FILE_REASON_STOP: c_int = 2;
@@ -9402,6 +10098,7 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +    pub video_format: Option<String>,
 +    pub audio_format: Option<String>,
 +    pub separate_audio: bool,
++    pub max_height: u32,
 +}
 +
 +#[derive(Clone, Debug)]
@@ -9835,116 +10532,10 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +    None
 +}
 +
-+/// A stream selected by the independent yt-dlp resolver.
-+#[derive(Clone, Debug)]
-+pub struct ResolvedStream {
-+    pub video_url: String,
-+    pub audio_url: Option<String>,
-+    pub title: Option<String>,
-+    pub duration: Option<f64>,
-+    pub video_format: Option<String>,
-+    pub audio_format: Option<String>,
-+    pub is_local: bool,
-+}
-+
-+impl ResolvedStream {
-+    fn direct(url: impl Into<String>, duration: Option<f64>, is_local: bool) -> Self {
-+        Self {
-+            video_url: url.into(),
-+            audio_url: None,
-+            title: None,
-+            duration,
-+            video_format: None,
-+            audio_format: None,
-+            is_local,
-+        }
-+    }
-+}
-+
-+#[derive(Debug, Deserialize)]
-+struct YtDlpFormat {
-+    url: String,
-+    #[serde(default)]
-+    format_id: Option<String>,
-+    #[serde(default)]
-+    ext: Option<String>,
-+    #[serde(default)]
-+    vcodec: Option<String>,
-+    #[serde(default)]
-+    acodec: Option<String>,
-+}
-+
-+#[derive(Debug, Deserialize)]
-+struct YtDlpInfo {
-+    #[serde(default)]
-+    url: Option<String>,
-+    #[serde(default)]
-+    title: Option<String>,
-+    #[serde(default)]
-+    duration: Option<f64>,
-+    #[serde(default)]
-+    requested_formats: Option<Vec<YtDlpFormat>>,
-+    #[serde(default)]
-+    ext: Option<String>,
-+    #[serde(default)]
-+    vcodec: Option<String>,
-+}
-+
-+const YTDLP_FORMAT: &str =
-+    "bestvideo[vcodec^=avc1][ext=mp4][height<=360][fps<=30]+bestaudio[ext=m4a]/best[ext=mp4]/best";
-+
 +fn youtube_url(id: &str) -> Result<String, String> {
 +    let mut url = Url::parse("https://www.youtube.com/watch").map_err(|e| e.to_string())?;
 +    url.query_pairs_mut().append_pair("v", id);
 +    Ok(url.to_string())
-+}
-+
-+fn is_avc(value: Option<&str>) -> bool {
-+    value.is_some_and(|codec| codec.starts_with("avc"))
-+}
-+
-+fn choose_stream(info: YtDlpInfo) -> Result<ResolvedStream, String> {
-+    if let Some(formats) = info.requested_formats.as_ref() {
-+        let video = formats.iter().find(|format| {
-+            is_avc(format.vcodec.as_deref())
-+                && format.ext.as_deref().is_some_and(|ext| ext == "mp4")
-+        });
-+        let audio = formats.iter().find(|format| {
-+            format
-+                .acodec
-+                .as_deref()
-+                .is_some_and(|codec| codec.starts_with("mp4a"))
-+                || format.ext.as_deref().is_some_and(|ext| ext == "m4a")
-+        });
-+
-+        if let Some(video) = video {
-+            return Ok(ResolvedStream {
-+                video_url: video.url.clone(),
-+                audio_url: audio.map(|format| format.url.clone()),
-+                title: info.title,
-+                duration: info.duration,
-+                video_format: video.format_id.clone(),
-+                audio_format: audio.and_then(|format| format.format_id.clone()),
-+                is_local: false,
-+            });
-+        }
-+    }
-+
-+    if let Some(url) = info.url {
-+        if is_avc(info.vcodec.as_deref()) || info.ext.as_deref().is_some_and(|ext| ext == "mp4") {
-+            return Ok(ResolvedStream {
-+                video_url: url,
-+                audio_url: None,
-+                title: info.title,
-+                duration: info.duration,
-+                video_format: None,
-+                audio_format: None,
-+                is_local: false,
-+            });
-+        }
-+    }
-+
-+    Err("yt-dlp did not return an AVC/MP4 stream compatible with the Santos VDX path".into())
 +}
 +
 +/// Owned data needed by the resolver task. Keeping the GObject out of the
@@ -9959,10 +10550,11 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +    pub duration: Option<f64>,
 +    pub cookies: String,
 +    pub extractor_args: String,
++    pub max_height: u32,
 +}
 +
 +impl VideoRequest {
-+    pub fn from_video(video: &Video, cookies: String, extractor_args: String) -> Self {
++    pub fn from_video(video: &Video, cookies: String, extractor_args: String, quality: u32) -> Self {
 +        Self {
 +            platform: video.id().platform.as_ref().to_string(),
 +            id: video.id().id.to_string(),
@@ -9973,6 +10565,7 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +                .map(|duration| duration.num_seconds() as f64),
 +            cookies,
 +            extractor_args,
++            max_height: max_height(quality),
 +        }
 +    }
 +}
@@ -10015,13 +10608,14 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +    let extractor_args = request.extractor_args;
 +
 +    let mut command = Command::new("yt-dlp");
++    crate::resolver_environment::configure(&mut command);
 +    command
 +        .arg("--no-playlist")
 +        .arg("--skip-download")
 +        .arg("--no-warnings")
 +        .arg("--dump-single-json")
 +        .arg("--format")
-+        .arg(YTDLP_FORMAT);
++        .arg(format_selector(request.max_height));
 +    if !cookies.is_empty() {
 +        command.arg("--cookies").arg(cookies);
 +    }
@@ -10048,7 +10642,11 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +
 +    let info: YtDlpInfo = serde_json::from_slice(&output.stdout)
 +        .map_err(|e| format!("could not parse yt-dlp JSON: {e}"))?;
-+    let stream = choose_stream(info)?;
++    let stream = choose_stream(info, request.max_height)?;
++    if let Some(quality) = stream.quality.as_ref() {
++        log::info!("Pipeline quality selected={}x{} fps={:.3} requested_max_height={} video_format={:?}",
++            quality.width, quality.height, quality.fps, quality.max_height, stream.video_format);
++    }
 +    log::info!(
 +        "Pipeline resolver stage=urls-resolved video_url=yes audio_url={} video_format={:?} audio_format={:?} elapsed_ms={}",
 +        stream.audio_url.is_some(),
@@ -10199,6 +10797,9 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +    pub speed: f64,
 +    pub error: Option<String>,
 +    pending_stream: Option<ResolvedStream>,
++    active_stream: Option<ResolvedStream>,
++    first_current_frame_seen: bool,
++    holding_recovery_frame: bool,
 +    has_file: bool,
 +    /// Explicit load lifecycle. See `LoadPhase`.
 +    load_phase: LoadPhase,
@@ -10264,16 +10865,15 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +    cached_video_params: String,
 +    cached_profile: String,
 +    cached_timing_offset: String,
++    quality_evidence: QualityEvidence,
++    last_quality_probe: Option<Instant>,
++    metrics_enabled: bool,
 +}
 +
 +impl MpvPlayer {
 +    pub fn new(volume: f64, speed: f64, render_wakeup: RenderWakeup) -> Result<Self, String> {
-+        // Explicit product opt-in for Santos VO libmpv decoupling
-+        if std::env::var_os("SANTOS_VO_LIBMPV_DECOUPLE").is_none() {
-+            unsafe {
-+                std::env::set_var("SANTOS_VO_LIBMPV_DECOUPLE", "1");
-+            }
-+        }
++        // The launcher supplies the explicit VO opt-in before exec. Never
++        // mutate the Unix process environment after Tokio/GTK threads exist.
 +        let handle = unsafe { mpv_create() };
 +        if handle.is_null() {
 +            return Err("mpv_create returned null".into());
@@ -10322,6 +10922,9 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +            speed: speed.clamp(0.25, 4.0),
 +            error: None,
 +            pending_stream: None,
++            active_stream: None,
++            first_current_frame_seen: false,
++            holding_recovery_frame: false,
 +            has_file: false,
 +            load_phase: LoadPhase::Idle,
 +            renderer_error: None,
@@ -10367,7 +10970,7 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +            render_callbacks: 0,
 +            render_submits: 0,
 +            last_metrics_at: Instant::now(),
-+            last_metrics_cpu_ticks: read_main_thread_ticks(),
++            last_metrics_cpu_ticks: None,
 +            last_metrics_render_callbacks: 0,
 +            last_metrics_render_submits: 0,
 +            last_metrics_queue_render_requests: 0,
@@ -10380,6 +10983,10 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +            cached_video_params: String::new(),
 +            cached_profile: String::new(),
 +            cached_timing_offset: "0".to_string(),
++            quality_evidence: QualityEvidence::default(),
++            last_quality_probe: None,
++            metrics_enabled: matches!(std::env::var("PIPELINE_SANTOS_METRICS").as_deref(),
++                Ok("1") | Ok("true") | Ok("on")),
 +        };
 +
 +        let timing_offset_override = std::env::var("PIPELINE_SANTOS_MPV_TIMING_OFFSET")
@@ -10461,7 +11068,8 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +        let init_result = unsafe { mpv_initialize(player.handle) };
 +        if init_result < 0 {
 +            let error = error_text(init_result);
-+            unsafe { mpv_terminate_destroy(player.handle) };
++            // `player` already owns the handle: Drop is the sole destroy path,
++            // including this failed-initialize return and later option errors.
 +            return Err(error);
 +        }
 +
@@ -10648,6 +11256,8 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +            video_format: self.video_format.clone(),
 +            audio_format: self.audio_format.clone(),
 +            separate_audio: self.separate_audio,
++            max_height: self.quality_evidence.selected.as_ref().map_or(
++                crate::stream_quality::DEFAULT_MAX_HEIGHT, |quality| quality.max_height),
 +        }
 +    }
 +
@@ -10777,6 +11387,10 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +        self.load_phase = LoadPhase::Idle;
 +        if !self.handle.is_null() {
 +            let _ = self.set_flag_property("pause", true);
++            // A terminal deadline must also cancel an in-flight libavformat
++            // open/read, not merely pause a file that has not loaded yet.
++            // This is normal mpv file stop, never a driver unload or reset.
++            let _ = self.command(&["stop"]);
 +        }
 +        log::error!("Pipeline recovery failed: {error} (terminal state latched)");
 +    }
@@ -10787,7 +11401,7 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +            log::error!("Pipeline render failure: {error}");
 +        }
 +        self.render_error_reported = true;
-+        self.fail_recovery(error);
++        self.fail_renderer(error);
 +    }
 +
 +    pub fn invalidate_frame_gate(&mut self) {
@@ -10960,7 +11574,7 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +            || self.load_phase.loadfile_accepted()
 +            || self.recovery_snapshot.is_none()
 +            || self.recovery_resume_target.is_none()
-+            || !self.first_frame_submitted
++            || !self.first_current_frame_seen
 +        {
 +            return;
 +        }
@@ -10984,7 +11598,10 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +            snapshot.position.max(0.0)
 +        };
 +        let target_text = target.to_string();
-+        match self.command(&["seek", &target_text, "absolute+keyframes"]) {
++        // A paused replacement cannot play a keyframe preroll up to the saved
++        // position. One exact seek still preserves pause and avoids seek steps.
++        let mode = if snapshot.paused { "absolute+exact" } else { "absolute+keyframes" };
++        match self.command(&["seek", &target_text, mode]) {
 +            Ok(()) => {
 +                let now = Instant::now();
 +                self.recovery_resume_target = Some(target);
@@ -11030,6 +11647,31 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +        self.renderer_error.as_deref()
 +    }
 +
++    pub fn quality_evidence(&self) -> &QualityEvidence {
++        &self.quality_evidence
++    }
++
++    fn refresh_decoded_quality(&mut self) {
++        if !self.has_file { return; }
++        self.last_quality_probe = Some(Instant::now());
++        let width = self.get_i64("video-params/w").unwrap_or(0).max(0) as u32;
++        let height = self.get_i64("video-params/h").unwrap_or(0).max(0) as u32;
++        if width != 0 && height != 0 && (width, height) !=
++            (self.quality_evidence.decoded_width, self.quality_evidence.decoded_height) {
++            self.quality_evidence.decoded_width = width;
++            self.quality_evidence.decoded_height = height;
++            log::info!("Pipeline quality decoded={}x{} selected={:?} viewport={}x{} generation={}",
++                width, height, self.quality_evidence.selected, self.quality_evidence.viewport_width,
++                self.quality_evidence.viewport_height, self.media_generation);
++            if let Some(selected) = self.quality_evidence.selected.as_ref() {
++                if (width, height) != (selected.width, selected.height) {
++                    log::warn!("Pipeline selected/decode size mismatch selected={}x{} decoded={}x{}",
++                        selected.width, selected.height, width, height);
++                }
++            }
++        }
++    }
++
 +    /// True once the recovery budget is spent and the terminal state has latched.
 +    pub fn is_recovery_exhausted(&self) -> bool {
 +        self.recovery_exhausted
@@ -11067,7 +11709,10 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +            return;
 +        }
 +        log::info!("Pipeline bootstrap loadfile issued from bootstrap path");
-+        self.start_pending_stream();
++        if self.start_pending_stream().is_err() {
++            // The issuing function has already latched/logged the media error.
++            self.load_phase = LoadPhase::Idle;
++        }
 +    }
 +
 +    pub fn note_render_context_ready(&mut self) {
@@ -11087,6 +11732,18 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +    /// Deliberately does NOT touch the recovery budget: a GL problem is not a
 +    /// media problem, so yt-dlp must not be involved.
 +    pub fn retry_renderer(&mut self) {
++        if self.pending_stream.is_none() {
++            if let Some(stream) = self.active_stream.clone() {
++                let snapshot = self.recovery_snapshot();
++                self.recovery_resume_target = Some(snapshot.position);
++                self.recovery_snapshot = Some(snapshot);
++                self.recovery_resume_seek_sent = false;
++                self.recovery_resume_landing_pending = false;
++                self.recovery_resume_restart_seen = false;
++                self.pending_stream = Some(stream);
++                self.has_file = false;
++            }
++        }
 +        self.renderer_error = None;
 +        self.error = None;
 +        self.state = PlaybackState::Buffering;
@@ -11097,6 +11754,8 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +            LoadPhase::Idle
 +        };
 +        self.last_progress_at = Instant::now();
++        self.first_current_frame_seen = false;
++        self.holding_recovery_frame = false;
 +        log::info!(
 +            "Pipeline lifecycle stage=renderer-retry-armed generation={} phase={} \
 +             has_pending_stream={}",
@@ -11181,14 +11840,18 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +            && !self.recovery_exhausted
 +            && now.duration_since(self.last_progress_at) >= RECOVERY_LOAD_TIMEOUT
 +        {
-+            log::warn!(
-+                "Pipeline lifecycle stage=load-timeout generation={} phase={} \
-+                 playlist_entry_id={} classification=media-load-stall",
-+                self.media_generation,
-+                self.load_phase.label(),
-+                self.current_playlist_entry_id
-+            );
 +            self.request_recovery(RecoveryCause::NoProgress);
++            // request_recovery suppresses an already-owned recovery. Log only
++            // a newly scheduled request, not every 100ms while its open stalls.
++            if self.recovery_request.is_some() {
++                log::warn!(
++                    "Pipeline lifecycle stage=load-timeout generation={} phase={} \
++                     playlist_entry_id={} classification=media-load-stall",
++                    self.media_generation,
++                    self.load_phase.label(),
++                    self.current_playlist_entry_id
++                );
++            }
 +            return;
 +        }
 +
@@ -11265,6 +11928,8 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +        video_identity: impl Into<String>,
 +    ) -> Result<(), String> {
 +        self.error = None;
++        self.holding_recovery_frame = false;
++        self.first_current_frame_seen = false;
 +        self.render_error_reported = false;
 +        self.position = 0.0;
 +        self.duration = stream.duration.unwrap_or(0.0);
@@ -11292,6 +11957,11 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +        self.separate_audio = stream.audio_url.is_some();
 +        self.invalidate_frame_gate();
 +        self.pending_stream = Some(stream.clone());
++        self.active_stream = Some(stream.clone());
++        self.quality_evidence.selected = stream.quality.clone();
++        self.quality_evidence.decoded_width = 0;
++        self.quality_evidence.decoded_height = 0;
++        self.last_quality_probe = None;
 +        log::debug!(
 +            "loading mpv stream generation={} identity={} video_url_len={} separate_audio={} video_format={:?} audio_format={:?}",
 +            self.media_generation,
@@ -11314,6 +11984,8 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +        {
 +            return Err("stale recovery snapshot rejected".into());
 +        }
++        self.holding_recovery_frame = self.first_frame_submitted && !self.render_context.is_null();
++        self.first_current_frame_seen = false;
 +        self.media_generation = self.media_generation.wrapping_add(1);
 +        self.current_playlist_entry_id = 0;
 +        self.video_format = stream.video_format.clone();
@@ -11343,6 +12015,11 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +        self.last_progress_at = Instant::now();
 +        self.invalidate_frame_gate();
 +        self.pending_stream = Some(stream.clone());
++        self.active_stream = Some(stream.clone());
++        self.quality_evidence.selected = stream.quality.clone();
++        self.quality_evidence.decoded_width = 0;
++        self.quality_evidence.decoded_height = 0;
++        self.last_quality_probe = None;
 +        log::info!(
 +            "Pipeline recovery stage=replacement-start generation={} resume={:.2}s separate_audio={} video_format={:?} audio_format={:?}",
 +            self.media_generation,
@@ -11471,6 +12148,28 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +        self.last_frame_submit_at = Instant::now();
 +        self.cache_pause_observed = false;
 +        self.cancel_recovery();
++    }
++
++    /// Rebuild a paused frame after GTK discards/recreates its presentation
++    /// buffers. Keep pause, media generation, and the existing resolved stream;
++    /// a precise same-position seek supplies a real frame rather than exposing
++    /// cached GPU pixels after the surface transition.
++    pub fn refresh_paused_surface_frame(&mut self) {
++        if self.state != PlaybackState::Paused || !self.has_file {
++            return;
++        }
++        if self.get_flag("seekable") != Some(true) {
++            return;
++        }
++        let position = self.get_double("time-pos").unwrap_or(self.position).max(0.0);
++        let target = position.to_string();
++        if let Err(error) = self.command(&["seek", &target, "absolute+exact"]) {
++            log::warn!("Pipeline paused surface refresh failed: {error}");
++            return;
++        }
++        self.invalidate_frame_gate();
++        self.last_progress_at = Instant::now();
++        log::info!("Pipeline paused surface refresh position={position:.3} generation={} same_stream=true", self.media_generation);
 +    }
 +
 +    pub fn set_volume(&mut self, volume: f64) {
@@ -11644,6 +12343,7 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +                        );
 +                    } else {
 +                        self.has_file = true;
++                        self.refresh_decoded_quality();
 +                        self.load_phase = LoadPhase::Loaded;
 +                        self.last_progress_at = Instant::now();
 +                        log::info!(
@@ -11801,6 +12501,7 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +                    self.state = PlaybackState::Error;
 +                    self.error = Some("libmpv core shut down".into());
 +                }
++                MPV_EVENT_VIDEO_RECONFIG => self.refresh_decoded_quality(),
 +                _ => {}
 +            }
 +
@@ -11821,6 +12522,11 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +                }
 +            }
 +            return;
++        }
++
++        if self.has_file && self.quality_evidence.decoded_height == 0
++            && self.last_quality_probe.is_none_or(|last| last.elapsed() >= Duration::from_secs(1)) {
++            self.refresh_decoded_quality();
 +        }
 +
 +        if let Some(position) = self.get_double("time-pos") {
@@ -11930,6 +12636,9 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +    }
 +
 +    fn log_metrics_if_due(&mut self) {
++        // No property RPC, /proc read, sample sorting or allocation on the
++        // normal product path. Logging suppression alone is not a lazy guard.
++        if !self.metrics_enabled { return; }
 +        let now = Instant::now();
 +        let elapsed = now.duration_since(self.last_metrics_at);
 +        if elapsed < Duration::from_secs(2) {
@@ -12426,6 +13135,7 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +            self.next_frame_counts.unsupported += 1;
 +            return;
 +        }
++        if !log::log_enabled!(log::Level::Info) { return; }
 +        match state {
 +            NextFrameState::NoFrame => self.next_frame_counts.no_frame += 1,
 +            NextFrameState::Present => self.next_frame_counts.present += 1,
@@ -12581,6 +13291,14 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +    }
 +
 +    pub fn render(&mut self, width: i32, height: i32) -> RenderOutcome {
++        let viewport = (width.max(1) as u32, height.max(1) as u32);
++        if viewport != (self.quality_evidence.viewport_width, self.quality_evidence.viewport_height) {
++            self.quality_evidence.viewport_width = viewport.0;
++            self.quality_evidence.viewport_height = viewport.1;
++            log::info!("Pipeline quality viewport={}x{} decoded={}x{} generation={}",
++                viewport.0, viewport.1, self.quality_evidence.decoded_width,
++                self.quality_evidence.decoded_height, self.media_generation);
++        }
 +        let gate_closed = RenderOutcome {
 +            gate_open: false,
 +            new_frame_confirmed: false,
@@ -12625,6 +13343,37 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +            && !(self.recovery_resume_landing_pending && !new_frame_confirmed);
 +        self.note_next_frame_evidence(next_state, next_flags, next_target, gate_open);
 +
++        let awaiting_resume = self.recovery_snapshot.is_some()
++            && (!self.recovery_resume_seek_sent || (self.recovery_resume_landing_pending
++                && (!self.recovery_resume_restart_seen || self.recovery_resume_target.is_none_or(|target|
++                    !crate::recovery_policy::resume_is_close(self.position, target)))));
++        if self.has_file && self.load_phase == LoadPhase::Loaded && can_render && awaiting_resume {
++            // Consume current-generation frames to bootstrap the single resume
++            // seek and discard preroll, but never overwrite the last valid FBO.
++            // SKIP_RENDERING is the render API's explicit no-target-write path.
++            let mut skip = 1;
++            let mut block = 0;
++            let mut params = [
++                MpvRenderParam { type_: MPV_RENDER_PARAM_SKIP_RENDERING, data: (&mut skip as *mut c_int).cast() },
++                MpvRenderParam { type_: MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME, data: (&mut block as *mut c_int).cast() },
++                MpvRenderParam { type_: MPV_RENDER_PARAM_INVALID, data: ptr::null_mut() },
++            ];
++            let result = unsafe { mpv_render_context_render(self.render_context, params.as_mut_ptr()) };
++            if result < 0 { self.fail_render(error_text(result)); }
++            else if new_frame_confirmed {
++                if !self.first_current_frame_seen {
++                    log::info!("Pipeline recovery first current-generation frame consumed output_write=skipped frozen={} generation={}",
++                        self.holding_recovery_frame, self.media_generation);
++                }
++                self.first_current_frame_seen = true;
++            }
++            unsafe {
++                glBindFramebuffer(0x8D40, target_fbo);
++                glViewport(0, 0, width.max(1), height.max(1));
++            }
++            return gate_closed;
++        }
++
 +        // GtkGLArea renders into its own texture-backed FBO, and the clear has
 +        // to be placed deliberately, not unconditionally.
 +        //
@@ -12648,7 +13397,7 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +        // In every other case a confirmed frame is already on screen and mpv
 +        // simply has nothing new this tick, so the FBO is left untouched and the
 +        // last good picture stays visible.
-+        if !self.first_frame_submitted || gate_open {
++        if (!self.first_frame_submitted && !self.holding_recovery_frame) || gate_open {
 +            unsafe {
 +                glViewport(0, 0, width.max(1), height.max(1));
 +                glClearColor(0.008, 0.01, 0.012, 1.0);
@@ -12712,21 +13461,21 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +        if let Some(sink) = self.frame_trace.as_ref() {
 +            sink.mark_render_start();
 +        }
-+        let render_started = Instant::now();
++        let render_started = self.metrics_enabled.then(Instant::now);
 +        let result = unsafe { mpv_render_context_render(self.render_context, params.as_mut_ptr()) };
-+        self.render_samples_ns.push(
-+            render_started
++        if let Some(render_started) = render_started {
++            self.render_samples_ns.push(render_started
 +                .elapsed()
 +                .as_nanos()
-+                .min(u128::from(u64::MAX)) as u64,
-+        );
++                .min(u128::from(u64::MAX)) as u64);
++        }
 +        if result >= 0 {
 +            if let Some(sink) = self.frame_trace.as_ref() {
 +                sink.mark_render_done();
 +            }
 +            self.render_submits = self.render_submits.wrapping_add(1);
 +            let submit_now = Instant::now();
-+            if let Some(previous) = self.last_submit_at.replace(submit_now) {
++            if self.metrics_enabled && let Some(previous) = self.last_submit_at.replace(submit_now) {
 +                let gap = submit_now.saturating_duration_since(previous).as_nanos();
 +                let gap = gap.min(u128::from(u64::MAX)) as u64;
 +                self.interval_submit_gaps_ns.push(gap);
@@ -12744,11 +13493,17 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +            // every successful render; that is wrong, and the call is reverted. A
 +            // correct report_swap would belong to the real after-paint boundary,
 +            // which this pass does not attempt to prove.
-+            if self.recovery_resume_landing_pending && self.recovery_resume_restart_seen {
++            self.first_current_frame_seen |= new_frame_confirmed;
++            if self.recovery_resume_landing_pending && self.recovery_resume_restart_seen && new_frame_confirmed
++                && self.recovery_resume_target.is_some_and(|target| crate::recovery_policy::resume_is_close(self.position, target)) {
 +                self.recovery_resume_landing_pending = false;
 +                self.recovery_resume_landing_position = Some(self.position);
 +                self.recovery_resume_last_position = self.position;
 +                self.recovery_resume_last_forward_at = Some(Instant::now());
++                self.holding_recovery_frame = false;
++                if self.recovery_snapshot.as_ref().is_some_and(|snapshot| snapshot.paused) {
++                    self.recovery_sustained = true;
++                }
 +                log::info!(
 +                    "Pipeline recovery keyframe frame observed target={:.2}s landing={:.2}s generation={}",
 +                    self.recovery_resume_target.unwrap_or(self.position),
@@ -12799,6 +13554,10 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +        self.render_context = ptr::null_mut();
 +        self.render_callback_state = None;
 +        self.first_frame_submitted = false;
++        self.first_current_frame_seen = false;
++        self.holding_recovery_frame = false;
++        self.pending_update_flags.set(0);
++        self.render_queued.set(false);
 +        self.frame_gate_logged = false;
 +        self.next_frame_counts = NextFrameCounts::default();
 +        self.next_frame_unsupported_logged = false;
@@ -12814,7 +13573,8 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +    /// since. Presentation containment uses this to decide whether a deferred
 +    /// reveal is still allowed to expose the surface.
 +    pub fn first_frame_presented(&self) -> bool {
-+        self.first_frame_submitted
++        self.first_frame_submitted && !self.recovery_resume_landing_pending
++            && (self.recovery_resume_target.is_none() || self.recovery_resume_seek_sent)
 +    }
 +}
 +
@@ -12839,6 +13599,96 @@ index 0000000000000000000000000000000000000000..5349dccc1e54bd363d851da46738db7f
 +        if !self.handle.is_null() {
 +            unsafe { mpv_terminate_destroy(self.handle) };
 +            self.handle = ptr::null_mut();
++        }
++    }
++}
+diff --git a/src/recovery_policy.rs b/src/recovery_policy.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..8fe357a3744ff4dfa158881eb06f970f948da2c7
+--- /dev/null
++++ b/src/recovery_policy.rs
+@@ -0,0 +1,30 @@
++//! Pure, bounded recovery decisions shared by the page and the render gate.
++use std::time::{Duration, Instant};
++pub const TOTAL_TIMEOUT: Duration = Duration::from_secs(45);
++pub const RESUME_TOLERANCE: f64 = 0.5;
++
++pub fn deadline_expired(started: Option<Instant>, now: Instant) -> bool {
++    started.is_some_and(|value| now.saturating_duration_since(value) >= TOTAL_TIMEOUT)
++}
++
++pub fn resume_is_close(position: f64, target: f64) -> bool {
++    position.is_finite() && target.is_finite() && position >= 0.0 && target >= 0.0
++        && (position - target).abs() <= RESUME_TOLERANCE
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test] fn deadline_is_total_not_reset_by_an_attempt() {
++        let start=Instant::now();
++        assert!(!deadline_expired(Some(start), start + Duration::from_secs(44)));
++        assert!(deadline_expired(Some(start), start + Duration::from_secs(45)));
++        assert!(!deadline_expired(None, start + Duration::from_secs(999)));
++    }
++    #[test] fn reveal_rejects_preroll_overshoot_and_unknown_position() {
++        assert!(resume_is_close(11.6,12.0)); assert!(resume_is_close(12.5,12.0));
++        for value in [0.0,10.9,12.6,f64::NAN,f64::INFINITY,-1.0] {
++            assert!(!resume_is_close(value,12.0));
++        }
++    }
++}
+diff --git a/src/resolver_environment.rs b/src/resolver_environment.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..6c892861c4c1676f43d931607aa30e995dd8b84c
+--- /dev/null
++++ b/src/resolver_environment.rs
+@@ -0,0 +1,48 @@
++//! Non-graphical resolver boundary. Preserve ordinary networking/user variables
++//! but never map the UI's GLES/EGL stack into Python before its first instruction.
++use tokio::process::Command;
++
++pub const GRAPHICS_ENVIRONMENT: &[&str] = &[
++    "LD_PRELOAD", "LD_LIBRARY_PATH", "GDK_BACKEND", "GSK_RENDERER", "GDK_DISABLE",
++    "LIBEGL", "LIBGLESV2", "HYBRIS_ANDROID_SDK_VERSION", "HYBRIS_LINKER_DIR",
++    "HYBRIS_EGLPLATFORM", "HYBRIS_EGLPLATFORM_DIR", "EGL_PLATFORM", "SANTOS_EGL_PLATFORM",
++    "ANDROID_ROOT", "ANDROID_DATA", "LD_SHIM_LIBS", "GI_TYPELIB_PATH", "GNOME_SHELL_DATADIR",
++    "GSETTINGS_SCHEMA_DIR", "SANTOS_GLES2_TRACE", "SANTOS_VO_LIBMPV_DECOUPLE",
++];
++const TLS_PRELOAD: &str = "/root/libsantos-tlsfix.so";
++
++fn tls_preload(value: &str) -> Option<&'static str> {
++    // This known networking-only shim is distinct from the graphics preloads.
++    // Do not propagate unknown preload paths by merely matching a filename.
++    value.split(|c: char| c == ':' || c.is_ascii_whitespace())
++        .any(|entry| entry == TLS_PRELOAD).then_some(TLS_PRELOAD)
++}
++
++pub fn configure(command: &mut Command) {
++    let inherited = std::env::var("LD_PRELOAD").ok();
++    for key in GRAPHICS_ENVIRONMENT { command.env_remove(key); }
++    if inherited.as_deref().and_then(tls_preload).is_some() {
++        command.env("LD_PRELOAD", TLS_PRELOAD);
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test] fn only_exact_networking_shim_is_retained() {
++        assert_eq!(tls_preload("/root/libsantos-tlsfix.so:/usr/lib/libEGL.so"), Some(TLS_PRELOAD));
++        assert_eq!(tls_preload("/untrusted/libsantos-tlsfix.so"), None);
++        assert_eq!(tls_preload("/usr/lib/libEGL.so /usr/lib/libGLESv2.so"), None);
++    }
++    #[test] fn command_cleans_graphics_without_clearing_unrelated_user_environment() {
++        let mut cmd = Command::new("yt-dlp"); configure(&mut cmd);
++        let removals = cmd.as_std().get_envs().collect::<Vec<_>>();
++        for key in GRAPHICS_ENVIRONMENT {
++            if *key == "LD_PRELOAD" { continue; }
++            assert!(removals.iter().any(|(name, value)| name == key && value.is_none()));
++        }
++        for preserved in ["HOME", "PATH", "HTTPS_PROXY", "LANG"] {
++            assert!(!removals.iter().any(|(name, _)| name == &preserved));
 +        }
 +    }
 +}
@@ -12890,3 +13740,272 @@ index f38a531643b916c93c3d84e3f6a9b467110a086f..c57112a86177da1b9cbee13a60350054
              .await
              .ok()
      }
+diff --git a/src/store/sqlite.rs b/src/store/sqlite.rs
+index dcc0d21583e011c6c3cc4629fdee277c83e1dd56..42c5ca1572ad3e85c6d846613f4c308375f26da6 100644
+--- a/src/store/sqlite.rs
++++ b/src/store/sqlite.rs
+@@ -211,7 +211,7 @@ impl Store {
+         let transaction = self.connection.transaction()?;
+         let channel = &video.uploader;
+         transaction.execute("UPDATE OR IGNORE channels SET platform = ?1, id = ?2, name = ?3, avatar = ?4, banner = ?5, description = ?6, subscribers = ?7 WHERE platform = ?1 AND id = ?2;", (&channel.id.platform, &channel.id.id, &channel.name, &channel.avatar, &channel.banner, &channel.description, channel.subscribers))?;
+-        transaction.execute("UPDATE OR IGNORE videos SET platform = ?1, id = ?2, playable_url = ?3, uploader_id = ?4, title = ?5, uploaded = ?6, duration = ?7, thumbnail = ?8, description = ?9, views = ?10, likes = ?11, dislikes = ?12, is_live = ?13, requires_payment = ?14) WHERE platform = ?1 AND id = ?2);", (&video.id.platform, &video.id.id, &video.playable_url, &video.uploader.id.id, &video.title, &video.uploaded, video.duration.map(|d| d.num_seconds()), &video.thumbnail, &video.description, video.views, video.likes, video.dislikes, video.is_live, video.requires_payment))?;
++        transaction.execute("UPDATE OR IGNORE videos SET platform = ?1, id = ?2, playable_url = ?3, uploader_id = ?4, title = ?5, uploaded = ?6, duration = ?7, thumbnail = ?8, description = ?9, views = ?10, likes = ?11, dislikes = ?12, is_live = ?13, requires_payment = ?14 WHERE platform = ?1 AND id = ?2;", (&video.id.platform, &video.id.id, &video.playable_url, &video.uploader.id.id, &video.title, &video.uploaded, video.duration.map(|d| d.num_seconds()), &video.thumbnail, &video.description, video.views, video.likes, video.dislikes, video.is_live, video.requires_payment))?;
+         transaction.commit()?;
+         Ok(())
+     }
+@@ -468,7 +468,7 @@ impl Store {
+     pub fn trim_unused(&mut self) -> Result<(), Error> {
+         let transaction = self.connection.transaction()?;
+         transaction.execute(
+-            "DELETE FROM videos WHERE (platform, id) NOT IN ((SELECT platform, video_id AS id FROM watch_later UNION SELECT platform, video_id AS id FROM watch_history UNION SELECT platform, video_id AS id FROM downloaded);",
++            "DELETE FROM videos WHERE (platform, id) NOT IN (SELECT platform, video_id AS id FROM watch_later UNION SELECT platform, video_id AS id FROM watch_history UNION SELECT platform, video_id AS id FROM downloaded);",
+             [],
+         )?;
+         transaction.execute("DELETE FROM channels WHERE (platform, id) NOT IN (SELECT platform, channel_id AS id FROM subscriptions UNION SELECT platform, uploader_id AS id FROM videos);", [])?;
+@@ -667,4 +667,37 @@ mod test {
+ 
+         Ok(())
+     }
++
++    #[test]
++    fn update_existing_video_is_valid_sql() -> Result<(), Box<dyn std::error::Error>> {
++        let mut store = Store::in_memory()?;
++        let mut video = dummy_video(1, dummy_channel(1));
++        store.watch_later(&video)?;
++        video.title = "updated metadata".into();
++        store.update_video_if_exists(&video)?;
++        assert_eq!(store.watch_later_list()?[0].title, video.title);
++        Ok(())
++    }
++
++    #[test]
++    fn trim_preserves_history_downloads_watch_later_and_subscriptions() -> Result<(), Box<dyn std::error::Error>> {
++        let mut store = Store::in_memory()?;
++        let later = dummy_video(1, dummy_channel(1));
++        let history = dummy_video(2, dummy_channel(2));
++        let downloaded = dummy_video(3, dummy_channel(3));
++        let subscribed = dummy_channel(4);
++        store.watch_later(&later)?;
++        store.watched(&history, &Utc::now())?;
++        store.watch_later(&downloaded)?;
++        store.downloaded(&downloaded.id, "/test/local.mp4")?;
++        store.remove_watch_later(&downloaded)?;
++        store.subscribe(&subscribed)?;
++        store.trim_unused()?;
++        assert_eq!(store.watch_later_list()?.len(), 1);
++        assert_eq!(store.watch_history()?.len(), 1);
++        assert_eq!(store.downloaded_list()?.len(), 1);
++        assert_eq!(store.subscriptions()?, vec![subscribed]);
++        assert_eq!(store.connection.query_row("SELECT COUNT(*) FROM videos", [], |row| row.get::<_, i32>(0))?, 3);
++        Ok(())
++    }
+ }
+diff --git a/src/stream_quality.rs b/src/stream_quality.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..88955d1c932ad0e467fa4e88f9e5a48ccd59c6bc
+--- /dev/null
++++ b/src/stream_quality.rs
+@@ -0,0 +1,203 @@
++//! Input selection, not a decoder upscaler. Keep stream, decode and viewport
++//! dimensions distinct so a small source cannot be reported as HD playback.
++use serde::Deserialize;
++
++pub const DEFAULT_MAX_HEIGHT: u32 = 720;
++pub const QUALITY_HEIGHTS: [u32; 4] = [360, 480, 720, 1080];
++const MAX_WIDTH: u32 = 1920;
++const MAX_FPS: f64 = 30.0;
++
++pub fn max_height(value: u32) -> u32 {
++    if QUALITY_HEIGHTS.contains(&value) { value } else { DEFAULT_MAX_HEIGHT }
++}
++
++pub fn format_selector(height: u32) -> String {
++    let height = max_height(height);
++    // The progressive fallback has the SAME codec/size/fps constraints. Do not
++    // fall back to unbounded `best` or infer H.264 merely from an MP4 extension.
++    format!(
++        "bestvideo[vcodec^=avc1][ext=mp4][width<=1920][height<={height}][fps<=30]+bestaudio[acodec^=mp4a][ext=m4a]/best[vcodec^=avc1][ext=mp4][width<=1920][height<={height}][fps<=30]"
++    )
++}
++
++#[derive(Clone, Debug, PartialEq)]
++pub struct StreamQuality {
++    pub width: u32,
++    pub height: u32,
++    pub fps: f64,
++    pub max_height: u32,
++}
++
++#[derive(Clone)]
++pub struct ResolvedStream {
++    pub video_url: String,
++    pub audio_url: Option<String>,
++    pub title: Option<String>,
++    pub duration: Option<f64>,
++    pub video_format: Option<String>,
++    pub audio_format: Option<String>,
++    pub quality: Option<StreamQuality>,
++    pub is_local: bool,
++}
++
++impl ResolvedStream {
++    pub fn direct(url: impl Into<String>, duration: Option<f64>, is_local: bool) -> Self {
++        Self { video_url: url.into(), audio_url: None, title: None, duration,
++               video_format: None, audio_format: None, quality: None, is_local }
++    }
++}
++
++#[derive(Deserialize)]
++pub struct YtDlpFormat {
++    pub url: String,
++    #[serde(default)]
++    pub format_id: Option<String>,
++    #[serde(default)]
++    pub ext: Option<String>,
++    #[serde(default)]
++    pub vcodec: Option<String>,
++    #[serde(default)]
++    pub acodec: Option<String>,
++    #[serde(default)]
++    pub width: Option<u32>,
++    #[serde(default)]
++    pub height: Option<u32>,
++    #[serde(default)]
++    pub fps: Option<f64>,
++}
++
++#[derive(Deserialize)]
++pub struct YtDlpInfo {
++    #[serde(default)]
++    pub url: Option<String>,
++    #[serde(default)]
++    pub title: Option<String>,
++    #[serde(default)]
++    pub duration: Option<f64>,
++    #[serde(default)]
++    pub requested_formats: Option<Vec<YtDlpFormat>>,
++    #[serde(default)]
++    pub format_id: Option<String>,
++    #[serde(default)]
++    pub ext: Option<String>,
++    #[serde(default)]
++    pub vcodec: Option<String>,
++    #[serde(default)]
++    pub acodec: Option<String>,
++    #[serde(default)]
++    pub width: Option<u32>,
++    #[serde(default)]
++    pub height: Option<u32>,
++    #[serde(default)]
++    pub fps: Option<f64>,
++}
++
++fn avc(codec: Option<&str>) -> bool {
++    codec.is_some_and(|value| value.starts_with("avc1") || value == "h264")
++}
++
++fn quality(format: &YtDlpFormat, limit: u32) -> Option<StreamQuality> {
++    let (width, height, fps) = (format.width?, format.height?, format.fps?);
++    if !avc(format.vcodec.as_deref()) || format.ext.as_deref() != Some("mp4")
++        || width == 0 || width > MAX_WIDTH || height == 0 || height > max_height(limit)
++        || !fps.is_finite() || fps <= 0.0 || fps > MAX_FPS
++        || !(format.url.starts_with("https://") || format.url.starts_with("http://"))
++    { return None; }
++    Some(StreamQuality { width, height, fps, max_height: max_height(limit) })
++}
++
++pub fn choose_stream(info: YtDlpInfo, limit: u32) -> Result<ResolvedStream, String> {
++    if let Some(formats) = info.requested_formats.as_ref() {
++        let video = formats.iter().filter_map(|format| quality(format, limit).map(|q| (format, q)))
++            .max_by_key(|(_, q)| (q.height, q.width));
++        let audio = formats.iter().find(|format| {
++            format.acodec.as_deref().is_some_and(|codec| codec.starts_with("mp4a"))
++                && format.vcodec.as_deref().is_none_or(|codec| codec == "none")
++                && format.ext.as_deref() == Some("m4a")
++                && (format.url.starts_with("https://") || format.url.starts_with("http://"))
++        });
++        if let Some((video, quality)) = video {
++            return Ok(ResolvedStream { video_url: video.url.clone(), audio_url: audio.map(|f| f.url.clone()),
++                title: info.title, duration: info.duration, video_format: video.format_id.clone(),
++                audio_format: audio.and_then(|f| f.format_id.clone()), quality: Some(quality), is_local: false });
++        }
++    }
++    if let Some(url) = info.url {
++        let format = YtDlpFormat { url, format_id: info.format_id, ext: info.ext, vcodec: info.vcodec,
++            acodec: info.acodec, width: info.width, height: info.height, fps: info.fps };
++        if let Some(quality) = quality(&format, limit) {
++            return Ok(ResolvedStream { video_url: format.url, audio_url: None, title: info.title,
++                duration: info.duration, video_format: format.format_id, audio_format: None,
++                quality: Some(quality), is_local: false });
++        }
++    }
++    Err(format!("No verified H.264/MP4 stream at or below {}p and 30 fps", max_height(limit)))
++}
++
++#[derive(Clone, Debug, Default, PartialEq)]
++pub struct QualityEvidence {
++    pub selected: Option<StreamQuality>,
++    pub decoded_width: u32,
++    pub decoded_height: u32,
++    pub viewport_width: u32,
++    pub viewport_height: u32,
++}
++
++impl QualityEvidence {
++    pub fn description(&self) -> String {
++        let decoded = if self.decoded_height == 0 { "Video size pending".to_string() } else {
++            format!("Video {}×{} ({}p)", self.decoded_width, self.decoded_height, self.decoded_height)
++        };
++        if self.viewport_width == 0 { decoded } else {
++            format!("{decoded} · Surface {}×{}", self.viewport_width, self.viewport_height)
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn info(json: serde_json::Value) -> YtDlpInfo { serde_json::from_value(json).unwrap() }
++    fn video(height: u32) -> serde_json::Value {
++        serde_json::json!({"url":"https://example.invalid/video", "format_id":"v", "ext":"mp4",
++            "vcodec":"avc1.64001f", "acodec":"none", "width":height*16/9, "height":height, "fps":30.0})
++    }
++    #[test] fn default_is_720_and_fallback_is_not_unbounded() {
++        let selector = format_selector(0);
++        assert!(selector.contains("height<=720"));
++        assert!(!selector.contains("/best[ext=mp4]/best"));
++        assert_eq!(selector.matches("fps<=30").count(), 2);
++        assert_eq!(max_height(1080), 1080);
++    }
++    #[test] fn adaptive_pair_keeps_actual_resolution_not_viewport() {
++        let input = serde_json::json!({"requested_formats":[video(720),
++            {"url":"https://example.invalid/audio","format_id":"a","ext":"m4a","vcodec":"none","acodec":"mp4a.40.2"}]});
++        let stream = choose_stream(info(input), 720).unwrap();
++        assert_eq!(stream.quality.unwrap().height, 720);
++        assert!(stream.audio_url.is_some());
++    }
++    #[test] fn low_source_is_reported_low_not_promoted_to_hd() {
++        let stream = choose_stream(info(video(360)), 720).unwrap();
++        assert_eq!(stream.quality.unwrap().height, 360);
++        let q = QualityEvidence { decoded_width:640, decoded_height:360, viewport_width:1280,
++            viewport_height:720, ..Default::default() };
++        assert_eq!(q.description(), "Video 640×360 (360p) · Surface 1280×720");
++    }
++    #[test] fn explicit_1080_is_not_selected_for_720() {
++        assert!(choose_stream(info(video(1080)), 720).is_err());
++        assert_eq!(choose_stream(info(video(1080)), 1080).unwrap().quality.unwrap().height, 1080);
++    }
++    #[test] fn incompatible_or_unknown_codec_size_fps_is_refused() {
++        for (key, value) in [("vcodec", serde_json::json!("vp09")), ("height", serde_json::json!(4320)),
++            ("width", serde_json::json!(3840)), ("fps", serde_json::json!(60)),
++            ("fps", serde_json::Value::Null), ("vcodec", serde_json::Value::Null)] {
++            let mut input = video(720); input[key] = value;
++            assert!(choose_stream(info(input), 720).is_err());
++        }
++    }
++    #[test] fn progressive_format_id_is_preserved() {
++        let mut input=video(480); input["format_id"]=serde_json::json!("18");
++        let stream=choose_stream(info(input),720).unwrap();
++        assert_eq!(stream.video_format.as_deref(),Some("18")); assert!(stream.audio_url.is_none());
++    }
++}

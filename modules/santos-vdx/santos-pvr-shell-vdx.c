@@ -54,6 +54,8 @@
 #include "mmap.h"
 #include "pvr_bridge.h"
 #include "santos-irq.h"
+#include "santos-vdx-memory.h"
+#include "santos-vdx-irq.h"
 
 /* Provided by santos-pvr112 (santos-stub-sync.c); resolved via symbol_get. */
 struct file *SantosPVRSyncNewFenceFile(const char *szName);
@@ -126,6 +128,10 @@ static void __iomem *santos_vsync_regs;
 static int (*santos_irq_service)(struct drm_device *);
 static int santos_irq = -1;
 static bool santos_irq_stopping;
+static void (*santos_vdx_irq_service)(void);
+static void (*santos_vdx_irq_stopped)(void);
+static int (*santos_vdx_irq_provider_pin)(struct drm_device *, struct drm_file *);
+static u32 santos_vdx_irq_saved_enable, santos_vdx_irq_saved_mask;
 
 /* VSYNC state is deliberately separate from Candidate3B retirement state. */
 static DEFINE_MUTEX(santos_vsync_state_lock);
@@ -720,7 +726,7 @@ static const struct vm_operations_struct santos_bo_vm_ops = {
 	.close = santos_bo_vma_close,
 };
 
-static int shell_quiet;
+static int shell_quiet = 1;
 module_param(shell_quiet, int, 0644);
 MODULE_PARM_DESC(shell_quiet, "1 = suppress hot-path breadcrumbs");
 
@@ -853,7 +859,14 @@ static int santos_vdx_bo_mmap(struct vm_area_struct *vma)
 		return -ENOENT;
 	}
 	for (off = 0; off < len; off += PAGE_SIZE) {
-		unsigned long pfn = page_to_pfn(virt_to_page(bo->cpu + off));
+		struct page *page = santos_vdx_cpu_page(bo->cpu + off);
+		unsigned long pfn;
+
+		if (!page) {
+			mutex_unlock(&santos_fake_ttm_lock);
+			return -EFAULT;
+		}
+		pfn = page_to_pfn(page);
 		if (remap_pfn_range(vma, vma->vm_start + off, pfn,
 				    PAGE_SIZE, vma->vm_page_prot)) {
 			mutex_unlock(&santos_fake_ttm_lock);
@@ -911,7 +924,9 @@ static int santos_pvr_psb_pl_create(struct drm_device *dev, void *arg,
 			mutex_unlock(&santos_fake_ttm_lock);
 			return -ENOSPC;
 		}
-		bo->cpu = alloc_pages_exact(size, GFP_KERNEL | __GFP_ZERO);
+		/* Firmware has per-page MMU mappings; high-order physical
+		 * contiguity is unnecessary and fails after normal fragmentation. */
+		bo->cpu = santos_vdx_cpu_alloc(size);
 		if (bo->cpu)
 			clflush_cache_range(bo->cpu, size);
 		if (!bo->cpu) {
@@ -924,7 +939,7 @@ static int santos_pvr_psb_pl_create(struct drm_device *dev, void *arg,
 		ret = santos_bo_add_file_ref_locked(bo, file->filp);
 		if (ret) {
 			santos_gpu_va_free_locked(bo->gpu_offset, size);
-			free_pages_exact(bo->cpu, size);
+			kvfree(bo->cpu);
 			memset(bo, 0, sizeof(*bo));
 			mutex_unlock(&santos_fake_ttm_lock);
 			return ret;
@@ -1230,6 +1245,8 @@ static int santos_pvr_psb_pl_waitidle(struct drm_device *dev, void *arg,
 
 	for (;;) {
 		u32 seq;
+		int gen;
+		long waited;
 
 		mutex_lock(&santos_fake_ttm_lock);
 		santos_vdx_drain_pending_locked();
@@ -1244,6 +1261,26 @@ static int santos_pvr_psb_pl_waitidle(struct drm_device *dev, void *arg,
 		if (!bo) {
 			mutex_unlock(&santos_fake_ttm_lock);
 			return -EINVAL;
+		}
+		/* 3.4 first reserves the BO, so an in-flight relocation/submit
+		 * window cannot look idle just because last_seq is still old.
+		 * Sample the shared generation under the BO lock; no pointer is
+		 * kept across sleep, and publish/unreserve wakes this queue. */
+		if (bo->submitting) {
+			if (a->mode & SANTOS_WAITIDLE_MODE_NO_BLOCK) {
+				mutex_unlock(&santos_fake_ttm_lock);
+				return -EBUSY;
+			}
+			gen = atomic_read(&santos_bo_synccpu_gen);
+			mutex_unlock(&santos_fake_ttm_lock);
+			waited = wait_event_interruptible_timeout(santos_bo_synccpu_wq,
+					atomic_read(&santos_bo_synccpu_gen) != gen,
+					msecs_to_jiffies(500));
+			if (santos_vdx_engine_terminal())
+				return -EIO;
+			if (waited <= 0)
+				return waited ? -ERESTARTSYS : -ETIMEDOUT;
+			continue;
 		}
 		seq = bo->last_seq;
 		if (!seq ||
@@ -1559,7 +1596,7 @@ static void santos_vdx_bo_put_locked(struct santos_fake_ttm_bo *bo)
 			symbol_put(santos_vdx_mmu_unmap_pages);
 		}
 		if (bo->cpu)
-			free_pages_exact(bo->cpu, bo->size);
+			kvfree(bo->cpu);
 		santos_gpu_va_free_locked(bo->gpu_offset, bo->size);
 		memset(bo, 0, sizeof(*bo));
 	}
@@ -2548,11 +2585,13 @@ static_assert(ARRAY_SIZE(santos_pvr_ioctls) == 0x5f);
 static struct pci_dev *santos_pvr_pdev;
 static struct drm_device *santos_pvr_drm;
 
-/* Golden psb_irq.c: SGX bit only; display/VDX state is retained. */
+/* Golden psb_irq.c source bits. Default remains SGX only; an explicitly
+ * registered VDX engine may share the existing vector without touching display. */
 #define SANTOS_INT_ENABLE 0x20a0
 #define SANTOS_INT_IDENTITY 0x20a4
 #define SANTOS_INT_MASK 0x20a8
 #define SANTOS_INT_SGX BIT(18)
+#define SANTOS_INT_MSVDX BIT(19)
 
 static void santos_irq_mask(void __iomem *regs)
 {
@@ -2566,15 +2605,119 @@ static void santos_irq_mask(void __iomem *regs)
 static irqreturn_t santos_sgx_interrupt(int irq, void *data)
 {
 	void __iomem *regs = santos_irq_regs;
+	void (*vdx_service)(void) = READ_ONCE(santos_vdx_irq_service);
+	u32 pending = readl(regs + SANTOS_INT_IDENTITY);
+	u32 handled = 0;
 
-	if (!(readl(regs + SANTOS_INT_IDENTITY) & SANTOS_INT_SGX))
+	if (pending & SANTOS_INT_SGX) {
+		/* Clear the SGX event and schedule MISR before acknowledging VDC. */
+		santos_irq_service(data);
+		handled |= SANTOS_INT_SGX;
+	}
+	if ((pending & SANTOS_INT_MSVDX) && vdx_service) {
+		vdx_service();
+		handled |= SANTOS_INT_MSVDX;
+	}
+	if (!handled)
 		return IRQ_NONE;
-	/* Clear the SGX event and schedule MISR before acknowledging VDC. */
-	santos_irq_service(data);
-	writel(SANTOS_INT_SGX, regs + SANTOS_INT_IDENTITY);
+	/* Acknowledge only sources we actually owned/serviced. */
+	writel(handled, regs + SANTOS_INT_IDENTITY);
 	readl(regs + SANTOS_INT_IDENTITY);
 	return IRQ_HANDLED;
 }
+
+static void santos_vdx_irq_mask_locked(void)
+{
+	writel(readl(santos_irq_regs + SANTOS_INT_ENABLE) & ~SANTOS_INT_MSVDX,
+	       santos_irq_regs + SANTOS_INT_ENABLE);
+	writel(readl(santos_irq_regs + SANTOS_INT_MASK) | SANTOS_INT_MSVDX,
+	       santos_irq_regs + SANTOS_INT_MASK);
+	readl(santos_irq_regs + SANTOS_INT_MASK);
+}
+
+/* Caller holds santos_irq_lock. Unpublish before synchronize_irq: an SGX
+ * interrupt can still arrive while the VDX source itself is masked. */
+static void santos_vdx_irq_detach_locked(void)
+{
+	void (*stopped)(void);
+
+	if (!santos_vdx_irq_service)
+		return;
+	stopped = santos_vdx_irq_stopped;
+	santos_vdx_irq_mask_locked();
+	WRITE_ONCE(santos_vdx_irq_service, NULL);
+	synchronize_irq(santos_irq);
+	santos_vdx_irq_stopped = NULL;
+	/* Notify only after all service calls have finished. The provider pin
+	 * and the engine's synchronizing fini still protect both lifetimes. */
+	if (stopped)
+		stopped();
+	writel(SANTOS_INT_MSVDX, santos_irq_regs + SANTOS_INT_IDENTITY);
+	writel((readl(santos_irq_regs + SANTOS_INT_MASK) & ~SANTOS_INT_MSVDX) |
+	       santos_vdx_irq_saved_mask, santos_irq_regs + SANTOS_INT_MASK);
+	writel((readl(santos_irq_regs + SANTOS_INT_ENABLE) & ~SANTOS_INT_MSVDX) |
+	       santos_vdx_irq_saved_enable, santos_irq_regs + SANTOS_INT_ENABLE);
+	readl(santos_irq_regs + SANTOS_INT_ENABLE);
+	if (santos_vdx_irq_provider_pin) {
+		santos_vdx_irq_provider_pin = NULL;
+		symbol_put(PVRSRVDrmOpen);
+	}
+}
+
+int santos_pvr_vdx_irq_register(void (*service)(void), void (*stopped)(void))
+{
+	int ret = 0;
+
+	mutex_lock(&santos_irq_lock);
+	if (!service || !stopped) {
+		ret = -EINVAL;
+		goto out;
+	}
+	if (santos_irq < 0 || !santos_irq_regs || santos_irq_stopping) {
+		ret = -ENODEV;
+		goto out;
+	}
+	if (santos_vdx_irq_service) {
+		ret = -EBUSY;
+		goto out;
+	}
+	/* Services owns the shared VDC BAR. Pin its module for the whole
+	 * registration, not merely while fetching its exported symbol. */
+	santos_vdx_irq_provider_pin = symbol_get(PVRSRVDrmOpen);
+	if (!santos_vdx_irq_provider_pin) {
+		ret = -ENODEV;
+		goto out;
+	}
+	santos_vdx_irq_saved_enable = readl(santos_irq_regs + SANTOS_INT_ENABLE) &
+				      SANTOS_INT_MSVDX;
+	santos_vdx_irq_saved_mask = readl(santos_irq_regs + SANTOS_INT_MASK) &
+				    SANTOS_INT_MSVDX;
+	santos_vdx_irq_mask_locked();
+	santos_vdx_irq_stopped = stopped;
+	WRITE_ONCE(santos_vdx_irq_service, service);
+	/* Callback/engine state must be visible before this source is enabled. */
+	wmb();
+	writel(readl(santos_irq_regs + SANTOS_INT_MASK) & ~SANTOS_INT_MSVDX,
+	       santos_irq_regs + SANTOS_INT_MASK);
+	writel(readl(santos_irq_regs + SANTOS_INT_ENABLE) | SANTOS_INT_MSVDX,
+	       santos_irq_regs + SANTOS_INT_ENABLE);
+	readl(santos_irq_regs + SANTOS_INT_ENABLE);
+out:
+	mutex_unlock(&santos_irq_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(santos_pvr_vdx_irq_register);
+
+void santos_pvr_vdx_irq_unregister(void (*service)(void))
+{
+	mutex_lock(&santos_irq_lock);
+	if (santos_vdx_irq_service == service && service)
+		santos_vdx_irq_detach_locked();
+	else
+		WARN_ON_ONCE(santos_vdx_irq_service != NULL);
+	mutex_unlock(&santos_irq_lock);
+}
+EXPORT_SYMBOL_GPL(santos_pvr_vdx_irq_unregister);
 
 int santos_pvr_irq_start(void __iomem *irq_regs,
 			 void __iomem *display_regs,
@@ -2663,6 +2806,10 @@ void santos_pvr_irq_stop(void)
 	wait_event(santos_vsync_users_wq,
 		   atomic_read(&santos_vsync_users) == 0);
 	if (santos_irq >= 0) {
+		/* Normal provider unload is barred by the registration pin. If
+		 * an explicit provider teardown occurs, detach/synchronize its
+		 * shared callback before the BAR/vector is destroyed. */
+		santos_vdx_irq_detach_locked();
 		santos_irq_mask(santos_irq_regs);
 		/* free_irq waits for callbacks before provider/MISR teardown. */
 		free_irq(santos_irq, santos_pvr_drm);

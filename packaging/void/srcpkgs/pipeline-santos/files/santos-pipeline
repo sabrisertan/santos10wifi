@@ -1,0 +1,117 @@
+#!/bin/sh
+# Verified private Pipeline runtime. Internal paths retain their historical
+# names; the public desktop name does not define acceptance or binary identity.
+set -eu
+
+ROOT=/opt/pipeline-santos-candidate
+APP=$ROOT/usr/bin/tubefeeder
+LIBDIR=$ROOT/usr/lib/pipeline-santos
+LIB=$LIBDIR/libmpv.so.2.5.0
+SONAME=$LIBDIR/libmpv.so.2
+IDENTITY=$ROOT/identity.sha256
+SCHEMA_DIR=$ROOT/usr/share/glib-2.0/schemas
+NETWORK_DIR=$ROOT/usr/libexec/pipeline-network
+DATA_IDENTITY=$ROOT/data-identity.sha256
+PROFILE=$ROOT/gtk4-client-candidate.ini
+HELPER=/usr/libexec/santos-client-environment
+PROCMATCH=/usr/local/bin/santos-proc-match
+LOG=/var/log/santos-pipeline-candidate.log
+
+log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >>"$LOG"; }
+
+# Preserve the accepted serialized launch and exact-identity stale-instance
+# cleanup. No cmdline-based shortcut is introduced for application cleanup.
+LOCKDIR=${XDG_RUNTIME_DIR:-/tmp}/santos-pipeline-candidate.lock
+LOCK_WAIT_TRIES=600
+lock_release() { rm -rf "$LOCKDIR" 2>/dev/null || true; }
+acquire_lock() {
+  _tries=0
+  while : ; do
+    if mkdir "$LOCKDIR" 2>/dev/null; then
+      echo "$$" > "$LOCKDIR/pid"
+      return 0
+    fi
+    _owner=$(cat "$LOCKDIR/pid" 2>/dev/null || echo "")
+    if [ -n "$_owner" ] && [ ! -d "/proc/$_owner" ]; then
+      rm -rf "$LOCKDIR" 2>/dev/null || true
+      continue
+    fi
+    _tries=$((_tries + 1))
+    if [ "$_tries" -ge "$LOCK_WAIT_TRIES" ]; then
+      return 1
+    fi
+    sleep 0.2
+  done
+}
+
+# Normal desktop launches already have the product user's live session.
+# This retained convenience path is only for an explicit root invocation.
+if [ "$(id -u)" = 0 ]; then
+  shell_pid=$(pgrep -u santos -f '/root/santos/gnome51/usr/bin/gnome-shell' | head -1 || true)
+  [ -n "$shell_pid" ] || { log "FATAL no live product session for re-exec"; exit 4; }
+  session_bus=$(tr '\0' '\n' <"/proc/$shell_pid/environ" \
+    | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p' | head -1 || true)
+  [ -n "$session_bus" ] || { log "FATAL product session has no DBUS address"; exit 4; }
+  log "re-exec into product session uid=santos bus_present=yes"
+  exec runuser -u santos -- env -i \
+    HOME=/home/santos USER=santos LOGNAME=santos LANG=C.UTF-8 \
+    PATH=/usr/lib/santos-gtk-client-runtime/bin:/usr/local/bin:/usr/bin:/bin \
+    XDG_RUNTIME_DIR=/run/user/1001 WAYLAND_DISPLAY=wayland-0 \
+    DBUS_SESSION_BUS_ADDRESS="$session_bus" \
+    PULSE_SERVER=unix:/run/user/1001/pulse/native \
+    XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=GNOME XDG_SESSION_DESKTOP=gnome \
+    setsid "$0" "$@"
+fi
+
+[ -x "$APP" ] || { log "FATAL missing Pipeline app $APP"; exit 2; }
+[ -f "$LIB" ] || { log "FATAL missing private libmpv $LIB"; exit 2; }
+[ -L "$SONAME" ] || { log "FATAL missing SONAME link $SONAME"; exit 2; }
+[ -f "$PROFILE" ] || { log "FATAL missing private profile $PROFILE"; exit 2; }
+[ -f "$IDENTITY" ] || { log "FATAL missing identity file $IDENTITY"; exit 2; }
+[ -f "$DATA_IDENTITY" ] || { log "FATAL missing Pipeline data identity $DATA_IDENTITY"; exit 2; }
+[ -f "$SCHEMA_DIR/gschemas.compiled" ] || { log "FATAL missing Pipeline settings schema"; exit 2; }
+[ -x "$PROCMATCH" ] || { log "FATAL missing helper $PROCMATCH"; exit 2; }
+[ -x "$NETWORK_DIR/yt-dlp" ] || { log "FATAL missing scoped network helper"; exit 2; }
+
+# The original three-file identity gate remains a full hash on every launch.
+# The independent data gate also binds the schema XML and compiled table.
+# Neither gate caches mtime/inodes or continues after a mismatch.
+for _identity in "$IDENTITY" "$DATA_IDENTITY"; do
+  if ! (cd "$ROOT" && sha256sum -c --status "$_identity") 2>>"$LOG"; then
+    log "FATAL identity mismatch for Pipeline runtime:"
+    (cd "$ROOT" && sha256sum -c "$_identity") >>"$LOG" 2>&1 || true
+    exit 3
+  fi
+done
+log "identity_ok $(tr '\n' ' ' <"$IDENTITY")"
+
+if ! acquire_lock; then
+  log "FATAL could not acquire launcher lock; refusing to launch unlocked"
+  exit 5
+fi
+trap lock_release EXIT INT TERM
+
+# Keep the existing bounded TERM/KILL policy and authoritative pid + starttime
+# + resolved-exe revalidation in the compiled helper. A failed reap is fatal.
+reap_out=$("$PROCMATCH" reap 6000 2>/dev/null) || reap_rc=$?
+reap_rc=${reap_rc:-0}
+if [ "$reap_rc" -ne 0 ]; then
+  log "FATAL stale-instance reap failed rc=$reap_rc; refusing to launch"
+  exit 6
+fi
+case "$reap_out" in
+  *REAP*recorded=0*) ;;
+  *REAP*) log "stale_instances_reaped $(printf '%s' "$reap_out" | tr '\n' ' ')" ;;
+esac
+
+# The common helper deliberately removes an inherited GSETTINGS_SCHEMA_DIR
+# from GNOME. Set this application-specific directory AFTER that sanitation,
+# without adding it to the common allowlist or changing the desktop's schema.
+RUST_LOG=${SANTOS_CANDIDATE_RUST_LOG:-warn} \
+  setsid "$HELPER" --profile "$PROFILE" --exec /usr/bin/env \
+    GSETTINGS_SCHEMA_DIR="$SCHEMA_DIR" \
+    PATH="$NETWORK_DIR:$PATH" \
+    SANTOS_VO_LIBMPV_DECOUPLE="${SANTOS_VO_LIBMPV_DECOUPLE:-1}" \
+    "$APP" "$@" >>"$LOG" 2>&1 &
+
+exit 0

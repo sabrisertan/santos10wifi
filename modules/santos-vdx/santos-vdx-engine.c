@@ -9,14 +9,18 @@
  * The message walker keeps the exact MFLD message ids, flag patches,
  * mmu_ptd placement and deblock full-size advance.
  *
- * Completion is synchronous for bring-up (to-host ring poll + MTX IRQ clear)
- * instead of the 3.4 IRQ + fence path; 3d replaces it with real interrupts.
+ * Default completion uses bounded to-host polling. An explicit eng_use_irq=1
+ * candidate shares the shell's installed MSI and uses the same validated
+ * completion/wakeup path; the timer is retained as deadline/missed-IRQ recovery.
  */
 
 #include "santos-vdx-compat.h"
+#include "santos-vdx-irq.h"
+#include "santos-vdx-memory.h"
 #include "santos-msvdx-reg.h"
 #include "santos-msvdx-msg.h"
 #include <linux/jiffies.h>
+#include <linux/moduleparam.h>
 #include <linux/timer.h>
 #include <linux/wait.h>
 #include <linux/workqueue.h>
@@ -88,6 +92,35 @@ static u32 eng_seq_done;
 static u32 eng_active_seq;
 static int eng_timer_armed;
 static struct timer_list eng_timer;
+static bool eng_use_irq;
+module_param(eng_use_irq, bool, 0444);
+MODULE_PARM_DESC(eng_use_irq, "1 = opt-in shared-MSI completion candidate (default polling)");
+static bool eng_irq_active;
+static bool eng_irq_detached;
+static unsigned int eng_irq_events;
+static unsigned int eng_poll_events;
+/* 0444 only restricts sysfs, not load-time argument parsing. Internal status
+ * must reject setters explicitly; it must not be spoofed by insmod arguments. */
+static int eng_status_set(const char *value, const struct kernel_param *parameter)
+{
+	(void)value;
+	(void)parameter;
+	return -EPERM;
+}
+
+static const struct kernel_param_ops eng_status_bool_ops = {
+	.set = eng_status_set,
+	.get = param_get_bool,
+};
+static const struct kernel_param_ops eng_status_uint_ops = {
+	.set = eng_status_set,
+	.get = param_get_uint,
+};
+module_param_cb(eng_irq_active, &eng_status_bool_ops, &eng_irq_active, 0444);
+MODULE_PARM_DESC(eng_irq_active, "read-only: shared-MSI callback registered");
+module_param_cb(eng_irq_events, &eng_status_uint_ops, &eng_irq_events, 0444);
+module_param_cb(eng_poll_events, &eng_status_uint_ops, &eng_poll_events, 0444);
+static u32 eng_irq_saved_host_enable;
 static wait_queue_head_t eng_wq;
 static wait_queue_head_t eng_slot_wq;
 static DEFINE_SPINLOCK(eng_qlock);
@@ -140,18 +173,24 @@ static inline int eng_seq_reached(u32 seq)
  * the runbook raises the console loglevel (dmesg -n 8). Survives a hard
  * reset in the Samsung sec_log region and is recoverable from p10 golden
  * /proc/last_kmsg after a wedge. */
-static int eng_quiet;
+static int eng_quiet = 1;
 module_param(eng_quiet, int, 0644);
 MODULE_PARM_DESC(eng_quiet, "1 = suppress hot-path breadcrumbs");
 
-static void eng_bc(const char *fmt, ...)
+/* Guard at the call site: quiet mode must not evaluate debug-only MMIO
+ * reads/arguments before entering the formatter. Fatal pr_err paths remain
+ * independent of this opt-in persistent breadcrumb stream. */
+#define eng_bc(...) do { \
+	if (!READ_ONCE(eng_quiet)) \
+		eng_breadcrumb(__VA_ARGS__); \
+} while (0)
+
+static void eng_breadcrumb(const char *fmt, ...)
 {
 	char buf[256];
 	va_list ap;
 	int n;
 
-	if (eng_quiet)
-		return;
 	n = scnprintf(buf, sizeof(buf), "SANTOS_VDX_BC[%d] ",
 		      atomic_inc_return(&eng_bc_seq));
 	va_start(ap, fmt);
@@ -286,6 +325,10 @@ static void eng_fail_locked(int reason)
 	eng_fail_reason = reason;
 	eng_busy = 0;
 	eng_q_count = 0;
+	if (READ_ONCE(eng_irq_active))
+		eng_wm(eng_rm(MSVDX_HOST_INTERRUPT_ENABLE_OFFSET) &
+		       ~MSVDX_INTERRUPT_STATUS_MTX_IRQ_MASK,
+		       MSVDX_HOST_INTERRUPT_ENABLE_OFFSET);
 	eng_wm(MSVDX_INTERRUPT_STATUS_MTX_IRQ_MASK,
 	       MSVDX_INTERRUPT_CLEAR_OFFSET);
 	eng_wake_all();
@@ -546,6 +589,87 @@ static void eng_send_one_locked(void)
 	eng_wake_all();
 }
 
+/* Same validated watermark/failure path as polling, never a BO callback.
+ * Terminal quiesce may gate the engine clocks, so no MMIO is read after the
+ * terminal/ready check. Outer shell acknowledges only the owned VDC bit. */
+static void eng_interrupt(void)
+{
+	unsigned long flags;
+	u32 status;
+
+	spin_lock_irqsave(&eng_qlock, flags);
+	if (!READ_ONCE(eng_ready) || !eng_reg || eng_terminal_locked())
+		goto out;
+	eng_irq_events++;
+	status = eng_rm(MSVDX_INTERRUPT_STATUS_OFFSET);
+	if (status & MSVDX_INTERRUPT_STATUS_MTX_IRQ_MASK) {
+		eng_wm(MSVDX_INTERRUPT_STATUS_MTX_IRQ_MASK,
+		       MSVDX_INTERRUPT_CLEAR_OFFSET);
+		eng_rm(MSVDX_INTERRUPT_CLEAR_OFFSET);
+	}
+	eng_drain_host_locked("irq");
+	if (!eng_terminal_locked())
+		eng_check_deadline_locked();
+	if (!eng_terminal_locked())
+		eng_send_one_locked();
+out:
+	spin_unlock_irqrestore(&eng_qlock, flags);
+}
+
+static unsigned long eng_poll_interval(void)
+{
+	/* IRQ delivery advances normal completion immediately. Keep a bounded
+	 * low-rate recovery poll for lost events and the active-job deadline. */
+	return msecs_to_jiffies(READ_ONCE(eng_irq_active) ? 10 : 1);
+}
+
+static void eng_interrupt_stopped(void)
+{
+	unsigned long flags;
+
+	/* Services may explicitly stop its vector. No BAR access here; a
+	 * still-running engine falls back to the original bounded polling.
+	 * Fini set ready=0 before unregister and must not rearm the timer. */
+	spin_lock_irqsave(&eng_qlock, flags);
+	WRITE_ONCE(eng_irq_detached, true);
+	WRITE_ONCE(eng_irq_active, false);
+	if (READ_ONCE(eng_ready) && !eng_terminal_locked() &&
+	    (eng_busy || eng_q_count)) {
+		mod_timer(&eng_timer, jiffies + msecs_to_jiffies(1));
+		eng_timer_armed = 1;
+	}
+	spin_unlock_irqrestore(&eng_qlock, flags);
+}
+
+static void eng_irq_setup(void)
+{
+	unsigned long flags;
+	int ret;
+
+	/* ready is still zero. A provider stop between registration and
+	 * activation records detached under the same lock used below; it
+	 * must never be overwritten by an optimistic active=true. */
+	WRITE_ONCE(eng_irq_detached, false);
+	eng_irq_saved_host_enable = eng_rm(MSVDX_HOST_INTERRUPT_ENABLE_OFFSET) &
+				    MSVDX_INTERRUPT_STATUS_MTX_IRQ_MASK;
+	ret = santos_pvr_vdx_irq_register(eng_interrupt, eng_interrupt_stopped);
+	if (ret) {
+		pr_warn("santos-vdx: shared MSI unavailable (%d); completion polling retained\n", ret);
+		return;
+	}
+	spin_lock_irqsave(&eng_qlock, flags);
+	if (!eng_irq_detached) {
+		WRITE_ONCE(eng_irq_active, true);
+		eng_wm(eng_rm(MSVDX_HOST_INTERRUPT_ENABLE_OFFSET) |
+		       MSVDX_INTERRUPT_STATUS_MTX_IRQ_MASK,
+		       MSVDX_HOST_INTERRUPT_ENABLE_OFFSET);
+		eng_rm(MSVDX_HOST_INTERRUPT_ENABLE_OFFSET);
+	}
+	spin_unlock_irqrestore(&eng_qlock, flags);
+	if (READ_ONCE(eng_irq_active))
+		pr_info("santos-vdx: shared-MSI completion enabled, 10ms recovery watchdog\n");
+}
+
 static void eng_tick(struct timer_list *t)
 {
 	unsigned long flags;
@@ -553,6 +677,7 @@ static void eng_tick(struct timer_list *t)
 	(void)t;
 	spin_lock_irqsave(&eng_qlock, flags);
 	if (!eng_terminal_locked()) {
+		eng_poll_events++;
 		/* Drain first: a valid completion sitting in the to-host ring on
 		 * the exact deadline tick must win over the deadline. Only after
 		 * the available firmware messages have been processed may the
@@ -564,7 +689,7 @@ static void eng_tick(struct timer_list *t)
 			eng_send_one_locked();
 	}
 	if (!eng_terminal_locked() && (eng_busy || eng_q_count)) {
-		mod_timer(&eng_timer, jiffies + msecs_to_jiffies(1));
+		mod_timer(&eng_timer, jiffies + eng_poll_interval());
 		eng_timer_armed = 1;
 	} else {
 		/* Terminal state never rearms; the timer is one-shot from here. */
@@ -659,10 +784,8 @@ static int eng_mtx_init(void)
 
 static int eng_ccbs_alloc(void)
 {
-	eng_ccb0 = alloc_pages_exact(SANTOS_RENDEC_A_SIZE,
-				     GFP_KERNEL | __GFP_ZERO);
-	eng_ccb1 = alloc_pages_exact(SANTOS_RENDEC_B_SIZE,
-				     GFP_KERNEL | __GFP_ZERO);
+	eng_ccb0 = santos_vdx_cpu_alloc(SANTOS_RENDEC_A_SIZE);
+	eng_ccb1 = santos_vdx_cpu_alloc(SANTOS_RENDEC_B_SIZE);
 	if (!eng_ccb0 || !eng_ccb1)
 		return -ENOMEM;
 
@@ -701,6 +824,8 @@ static int eng_queue_setup(void)
 	eng_state = ENG_STATE_RUNNING;
 	eng_fail_reason = ENG_FAIL_NONE;
 	eng_quiesce_runs = 0;
+	eng_irq_events = 0;
+	eng_poll_events = 0;
 	return 0;
 }
 
@@ -827,7 +952,11 @@ int santos_vdx_engine_init(void)
 	if (ret)
 		goto out;
 
-	eng_ready = 1;
+	if (eng_use_irq)
+		eng_irq_setup();
+	/* Publish ready only after the optional callback/host source is set up;
+	 * an interrupt in the registration window must not inspect half-init state. */
+	WRITE_ONCE(eng_ready, 1);
 	eng_bc("engine ready");
 	pr_info("santos-vdx-engine: ready\n");
 out:
@@ -1033,6 +1162,17 @@ void santos_vdx_engine_fini(void)
 
 	mutex_lock(&eng_lock);
 	WRITE_ONCE(eng_ready, 0);
+	if (eng_irq_active) {
+		/* No callback may reference engine code/MMIO after unregister.
+		 * Do not touch clock-gated MMIO after a terminal quiesce. */
+		santos_pvr_vdx_irq_unregister(eng_interrupt);
+		if (READ_ONCE(eng_state) == ENG_STATE_RUNNING && eng_reg)
+			eng_wm((eng_rm(MSVDX_HOST_INTERRUPT_ENABLE_OFFSET) &
+				~MSVDX_INTERRUPT_STATUS_MTX_IRQ_MASK) |
+			       eng_irq_saved_host_enable,
+			       MSVDX_HOST_INTERRUPT_ENABLE_OFFSET);
+		WRITE_ONCE(eng_irq_active, false);
+	}
 	if (eng_queue)
 		timer_shutdown_sync(&eng_timer);
 
@@ -1049,9 +1189,9 @@ void santos_vdx_engine_fini(void)
 		 * pins/maps are not touched here (Patch 3). */
 		santos_vdx_mmu_fini();
 		if (eng_ccb0)
-			free_pages_exact(eng_ccb0, SANTOS_RENDEC_A_SIZE);
+			kvfree(eng_ccb0);
 		if (eng_ccb1)
-			free_pages_exact(eng_ccb1, SANTOS_RENDEC_B_SIZE);
+			kvfree(eng_ccb1);
 	} else if (state == ENG_STATE_QUARANTINED) {
 		/* Quarantine already decided: do NOT run a second quiesce and do
 		 * not free DMA backing. */
@@ -1073,19 +1213,17 @@ void santos_vdx_engine_fini(void)
 			 * firmware and no hardware stop is required. */
 			santos_vdx_mmu_fini();
 			if (eng_ccb0)
-				free_pages_exact(eng_ccb0, SANTOS_RENDEC_A_SIZE);
+				kvfree(eng_ccb0);
 			if (eng_ccb1)
-				free_pages_exact(eng_ccb1, SANTOS_RENDEC_B_SIZE);
+				kvfree(eng_ccb1);
 		} else {
 			ret = eng_quiesce_terminal();
 			if (!ret) {
 				santos_vdx_mmu_fini();
 				if (eng_ccb0)
-					free_pages_exact(eng_ccb0,
-							 SANTOS_RENDEC_A_SIZE);
+					kvfree(eng_ccb0);
 				if (eng_ccb1)
-					free_pages_exact(eng_ccb1,
-							 SANTOS_RENDEC_B_SIZE);
+					kvfree(eng_ccb1);
 			} else {
 				pr_err("santos-vdx: full hardware stop failed %d; engine MMU/RENDEC memory quarantined until reboot\n",
 				       ret);
@@ -1291,7 +1429,7 @@ retry_slot:
 		eng_send_one_locked();
 	if (!eng_terminal_locked() && (eng_busy || eng_q_count) &&
 	    !eng_timer_armed) {
-		mod_timer(&eng_timer, jiffies + msecs_to_jiffies(1));
+		mod_timer(&eng_timer, jiffies + eng_poll_interval());
 		eng_timer_armed = 1;
 	}
 	spin_unlock_irqrestore(&eng_qlock, flags);

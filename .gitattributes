@@ -1,5 +1,7 @@
 * text=auto
-*.patch -text
+# A unified diff uses one space for an empty context line. Preserve its bytes;
+# reconstructed source and non-patch files are checked separately.
+*.patch -text whitespace=-blank-at-eol
 *.c text eol=lf
 *.h text eol=lf
 *.sh text eol=lf

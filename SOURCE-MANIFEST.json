@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "date": "2026-10-02",
+  "date": "2026-10-03",
   "kind": "experimental-source-preview",
   "components": [
     {
@@ -42,8 +42,10 @@
       "base": "36f5274d5caef98ba0acde4b947429bc93fffade",
       "source_head": "36f5274d5caef98ba0acde4b947429bc93fffade",
       "patch": "patches/pipeline/0001-santos.patch",
-      "changed_files": 27,
-      "upstream_sha256": "277779a350be719bf0758d7fa4c26899b2f669fd72a6cbc65fa3f48b61d9edd2"
+      "changed_files": 36,
+      "upstream_sha256": "277779a350be719bf0758d7fa4c26899b2f669fd72a6cbc65fa3f48b61d9edd2",
+      "source_revision": "quality-recovery-r7 + background-card-r6; recipe revision 6",
+      "note": "Runtime resolves through the system yt-dlp command; no pinned yt-dlp version. Cumulative source patch and recipe rebuild the same reviewed application source."
     },
     {
       "name": "gnome-shell",
@@ -68,6 +70,13 @@
       "license": "GPL-2.0-only",
       "hardware_oracle": "Intel/Samsung 3.4 SFI CPUFreq control path",
       "note": "Cloverview shared-package policy, observe-only default, explicit leased activation, built-in performance manager. Source/test export only; deployment manifests are generated from actual matching kernel/module builds."
+    },
+    {
+      "name": "santos-vdx",
+      "path": "modules/santos-vdx",
+      "integration_path": "integration/vdx",
+      "source_revision": "r7-page-backed-irq-quiet-waitidle",
+      "note": "Source and persistent bootstrap helper only. Kernel/module manifests and protected baseline backups must be generated from matching builds; no modules or vendor firmware distributed."
     }
   ]
 }

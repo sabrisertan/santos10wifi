@@ -1,17 +1,20 @@
 {
-  "checked": "2026-09-28",
+  "checked": "2026-10-03",
   "kernel_release": "7.2.0-00698-g92b0083794ca-highmem-p11",
-  "claim": "Read-only identity check; not new hardware acceptance",
+  "claim": "Matching installed private build and scoped media/navigation gates; no fresh-device installation acceptance",
   "loaded_module_build_ids": {
     "santos_pvr112": "d7c0368d4ff656363d82139bd8c2ac0ebe527ba0",
-    "santos_pvr_shell_vdx": "86ddb84677c6b02f3351280a4493c09c14ae1db8",
-    "santos_sync_core": "e8e25e0e96c8327f5a4b8dd3241f2aa5d6239605",
-    "santos_vdx": "9961db38f8c685a0e47f5ea1860b8e9834539ca6"
+    "santos_pvr_shell_vdx": "bd6c4932c086e3da2283974350d5813ca1ce4034",
+    "santos_vdx": "71492ddafa3203c3093dbf3d4a5a0349b6bd5965",
+    "santos_sync_core": "e8e25e0e96c8327f5a4b8dd3241f2aa5d6239605"
   },
   "installed_sha256": {
-    "pipeline": "c46e9811deb77bb71fa1a68db31a82f11a4ddfe4f4e3eeec0ea42a030fdb6f01",
+    "pipeline": "2da4b94d394595a34938f77b2f51febb39022535d09b0abf10fff4cf3bba6e35",
     "private_libmpv": "b813baa56c2142e80cd655504f5f5aa5b90ac46911b07364a58d2ae978598d9c",
     "private_gtk": "3324177c70b8b76116c7a90e69bd01c483e28d83084ce5a83303f38e5e2e5645",
     "firefox_launcher": "fb40c6e21c4c56f7f4813f6d4657517fb337b21185ad7a5afb819dcaf1bb7de4"
-  }
+  },
+  "pipeline_build_id": "d72dc149dc087693bcecb77a54476222440aedb3",
+  "standalone_mpv_package": "mpv-santos-cli-0.41.0_1",
+  "standalone_mpv_sha256": "5c7256c29b92cdd1afe715a35b82b4bd525a1c026c766a20ed461e03d868d1e5"
 }

@@ -68,6 +68,11 @@ Inspect conflicts with existing packages before building in an i686 masterdir.
 4.1.0 tarball. This replaces an older patch stack which applied successfully but
 missed the current `player.rs`, `video_page.rs` and `external_player.rs` contents.
 Do not apply both this recipe patch and `patches/pipeline/0001-santos.patch`.
+Revision 6 includes the current private layout/launcher and background-card fix.
+The separate Ptyxis recipe includes the terminal child-environment correction;
+ani-cli remains unchanged upstream source with an explicit local recipe.
+The standalone mpv launcher is under `integration/mpv-cli/`; its accepted local
+binary overlay is not a clean full xbps-src rebuild claim.
 
 The mpv recipe includes the opt-in VO decoupling fix; Pipeline explicitly sets
 `SANTOS_VO_LIBMPV_DECOUPLE=1`. Native mpv additionally requires
