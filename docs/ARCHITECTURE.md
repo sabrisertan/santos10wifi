@@ -20,12 +20,14 @@ components. `SOURCE-MANIFEST.json` records source bases and upstream archive has
 | `kernel/configs/` | Accepted HIGHMEM kernel configuration; no PAE; SGX is built externally |
 | `modules/santos-sync-core/` | Standalone native fence core matching the accepted HIGHMEM source/header hashes |
 | `modules/santos-vdx/` | DRM shell and video engine/MMU source; historical gate sources retained for build completeness |
+| `modules/santos-cpufreq/` | Cloverview SFI package CPUFreq driver; explicit enablement, renewable lease and safe control restoration |
 | `patches/gtk/` | GTK 4.22.4 SantosGL and application integration changes |
 | `patches/mutter/`, `patches/gnome-shell/` | GNOME 51 source deltas |
 | `patches/pipeline/` | Current Pipeline 4.1.0 delta, including embedded libmpv and timing fixes |
 | `packaging/void/` | Selected recipes/patches; upstream Void tree is required |
 | `integration/hybris-wayland/` | Current host Wayland bridge source and build helper |
 | `integration/runtime-reference/` | Read-only capture of installed GNOME service and audio configuration |
+| `integration/cpufreq/` | Build/boot/instance-pinned managed performance service and supervised rollback helper |
 | `integration/firefox/`, `patches/firefox/` | ESR78 compatibility experiment, guarded TLS shim and private EGL fix |
 | `configs/` | Recorded Meson user options and runtime-reference hashes |
 

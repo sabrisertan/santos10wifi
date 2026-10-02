@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "date": "2026-09-28",
+  "date": "2026-10-02",
   "kind": "experimental-source-preview",
   "components": [
     {
@@ -59,6 +59,15 @@
       "note": "Standalone fence core; source/header hashes match the accepted HIGHMEM module build record. Historical comments describe its earlier standalone stage.",
       "source_sha256": "33eb97b390b1e73bf410bdbe4588a79443fae3573a6506340dd110ce00fca53f",
       "header_sha256": "792cf4faf4c97d429638bf17c87621e01c4210b37a0a5eb6c25e717bf3fbda56"
+    },
+    {
+      "name": "santos-cpufreq",
+      "path": "modules/santos-cpufreq",
+      "integration_path": "integration/cpufreq",
+      "source_revision": "r9-package-managed-performance",
+      "license": "GPL-2.0-only",
+      "hardware_oracle": "Intel/Samsung 3.4 SFI CPUFreq control path",
+      "note": "Cloverview shared-package policy, observe-only default, explicit leased activation, built-in performance manager. Source/test export only; deployment manifests are generated from actual matching kernel/module builds."
     }
   ]
 }

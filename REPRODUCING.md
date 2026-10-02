@@ -9,7 +9,7 @@ separates the verified steps from the inputs and installation work still missing
 | Outcome | Current evidence / remaining limit |
 |---|---|
 | Reconstruct the modified Linux, GTK, Mutter, Shell and Pipeline sources | Pinned upstream inputs plus patches; changed-file comparisons passed |
-| Build Linux and external SGX/VDX/fence modules | Host build passed, including the separately packaged `santos-sync-core` |
+| Build Linux and external SGX/VDX/fence/CPUFreq modules | Prior full helper build and the additional CPUFreq external build passed; current evidence is scoped in validation |
 | Produce byte-identical binaries | Not established; recorded binary hashes identify a particular build, not a deterministic-build guarantee |
 | Rebuild the full GNOME/Void userspace | Incomplete: private dependencies, vendor inputs and a clean bootstrap recipe remain |
 | Install the photographed system on a fresh tablet | Not yet validated: rootfs, first boot, image assembly, storage migration and independent recovery still need an end-to-end procedure |
@@ -63,6 +63,7 @@ Expected outputs include:
 - `out/kernel/sync-core/santos-sync-core.ko` — the standalone native fence core.
 - `out/kernel/vdx/santos-pvr-shell-vdx.ko` and `santos-vdx.ko`.
 - `out/kernel/pvr/santos-pvr112.ko` and the other selected provider modules.
+- `out/kernel/cpufreq/santos-sfi-cpufreq.ko` — observe-only by default; managed performance requires explicit deployment.
 
 The build does not load modules, create a root filesystem or flash anything.
 `bzImage` still needs the correct Android boot wrapper/ramdisk and matching runtime
@@ -71,6 +72,19 @@ contains a historical localversion hash; use the manifest and source inputs to
 identify the new build rather than interpreting that embedded hash as its source
 commit. Only the supplied config and Santos provider path are supported by this
 trimmed DDK source preview.
+
+For a module-only CPUFreq build and a **new local bundle** pinned to your actual
+kernel/module ELF identities:
+
+```sh
+tools/build-cpufreq.sh out/kernel out/cpufreq-new
+python3 tools/prepare-cpufreq-service.py out/kernel \
+  out/cpufreq-new/santos-sfi-cpufreq.ko out/cpufreq-bundle-new
+```
+
+No installation or clock action is performed. See [CPUFreq deployment boundaries](docs/CPUFREQ.md)
+before applying the bundle to an existing development rootfs; the normal profile
+uses the built-in performance governor and preserves hardware thermal controls.
 
 ## 3. Reconstruct the desktop/application source trees
 

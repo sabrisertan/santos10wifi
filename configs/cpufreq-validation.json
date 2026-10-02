@@ -1,0 +1,67 @@
+{
+  "date": "2026-10-02",
+  "kind": "scoped-source-and-development-device-validation",
+  "source_revision": "r9-package-managed-performance",
+  "development_device": {
+    "hardware": "GT-P5210 Cloverview Atom Z2560",
+    "kernel_release": "7.2.0-00698-g92b0083794ca-highmem-p11",
+    "kernel_build_id": "b9cb31948f5f4bf73528b1d7ec88feef44931a9a",
+    "loaded_cpufreq_build_id": "761d1ed9bd8ecf1b187792890e3a8514b8434af2",
+    "profile": {
+      "governor": "performance",
+      "min_khz": 800000,
+      "max_khz": 1600000,
+      "lease_ms": 60000,
+      "heartbeat_seconds": 10,
+      "related_cpus": [0, 1, 2, 3]
+    },
+    "actual_loaded_core_frequency_mhz": "approximately 1598.4 on both physical cores",
+    "host_checks": {
+      "portable_control_and_table": 105,
+      "portable_package_domain": 221,
+      "service_validation_and_ownership": 24,
+      "sanitizer": "Clang ASAN and UBSAN passed"
+    },
+    "device_gates": [
+      "all four advertised frequency states under real load",
+      "shared package/max-request clock and CPU0 policy coverage",
+      "65-second managed operation beyond the initial 60-second lease",
+      "wrong kernel instance token rejection",
+      "concurrent manager lock rejection",
+      "manager crash and short-lease kernel unregister/restoration",
+      "owned dead-instance recovery",
+      "actual runit stop/restoration and re-enable"
+    ],
+    "final_service_active": true,
+    "final_service_coldboot_tested": false
+  },
+  "prior_video_fixture": {
+    "source": "1080p30, 300 encoded H.264 frames, local fixture",
+    "output": "960x540, GPU Wayland, Pulse audio",
+    "800_mhz": {"packets": 300, "frames": 300, "resets": 0, "sampled_vo_drops": 190},
+    "1600_mhz": {"packets": 300, "frames": 300, "resets": 0, "sampled_vo_drops": 0, "sampled_decoder_drops": 0},
+    "operator_smooth_video_at_1600_mhz": true,
+    "boot_memory_epochs_differ": true,
+    "same_boot_statistical_AB": false,
+    "universal_playback_or_allocator_acceptance": false
+  },
+  "publication_host_build": {
+    "matching_reconstructed_kernel_build_id": "328684c8857210a0a65038695ffaeee43a448d17",
+    "new_cpufreq_module_build_id": "c7de4f666daa85dee2740c53f82fc8a779b2d459",
+    "module_build_helper": "tools/build-cpufreq.sh",
+    "service_preparation_helper": "tools/prepare-cpufreq-service.py",
+    "module_build_and_bundle_preparation_passed": true,
+    "new_bundle_installed_or_booted": false,
+    "offline_unittest_cases": 23
+  },
+  "remaining_boundaries": [
+    "final-service cold boot",
+    "sustained thermal and power behavior",
+    "CPU hotplug and system suspend",
+    "VDX contiguous allocation, completion polling and debug overhead",
+    "native Cloverview CPU-idle support",
+    "long, network, corrupt and concurrent media",
+    "fresh-device installation and complete rootfs reproduction"
+  ],
+  "binary_payload_or_private_device_evidence_shipped": false
+}

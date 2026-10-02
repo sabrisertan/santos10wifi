@@ -23,4 +23,7 @@ awk '$2 == "santos_pvr_irq_start" || $2 == "santos_pvr_irq_stop" {print}' "$out/
 make -C "$kernel" O="$out" ARCH=x86 LOCALVERSION=-santos-preview M="$out/pvr" \
  CONFIG_DRM_PVRSGX_SANTOS_112=m KBUILD_EXTRA_SYMBOLS="$out/vdx-provider.symvers" \
  -j"${JOBS:-4}" modules
+cp -R "$release/modules/santos-cpufreq" "$out/cpufreq"
+make -C "$kernel" O="$out" ARCH=x86 LOCALVERSION=-santos-preview M="$out/cpufreq" \
+ -j"${JOBS:-4}" modules
 printf 'Built candidate in %s\n' "$out"

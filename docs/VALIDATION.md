@@ -70,3 +70,35 @@ and documentation/source-policy regressions. See [REPRODUCING.md](../REPRODUCING
 for the remaining full-desktop and device-installation gaps. Earlier file counts
 in this record describe their individual snapshots; current inventory comes from
 the source manifest/verifier, which intentionally excludes Markdown hashes.
+
+## CPUFreq follow-up: 2026-10-02
+
+The external Cloverview driver and managed performance integration were added
+without replacing the accepted kernel/graphics/media stack. The table/control
+and package-domain cases passed 105 + 221 host checks and sanitizer runs; service
+ownership/validation cases passed separately. Real device tests covered all four
+advertised states, the shared package clock across CPUs 0–3, normal release,
+renewal, actual lease expiry, manager crash, duplicate-manager rejection, kernel
+instance-token refusal, owned recovery and supervised stop/re-enable.
+
+One 1080p30 fixture at 1.6 GHz passed 300/300, zero sampled VO/decoder drops and
+maintainer-observed smoothness. Its matched 800 MHz control recorded 190 VO drops
+on another boot. An intervening nine-frame allocation-failure run and an early
+Shell-readiness abort were preserved privately and not counted as passes. No
+statistical same-boot repeated comparison, general media or allocator fix claim
+is made. The final managed service is active; its next actual cold boot and
+sustained thermal/hotplug/suspend remain untested boundaries.
+
+The public export includes no prebuilt `.ko`, firmware or private device logs.
+The new bundle helper generates hashes/build IDs from a matching local build;
+see [CPUFREQ.md](CPUFREQ.md) before any deployment. Source-preview build and CI
+results do not certify hardware behavior on a different kernel or device.
+
+The exported CPUFreq sources were compiled with the public module-only helper
+against the reconstructed public kernel build, and a new service bundle was
+prepared from the actual ELF build IDs; those outputs were not installed or
+booted. The public full-build helper's added CPUFreq step also has an offline
+command/snapshot regression test. A full kernel rebuild was not repeated for
+this follow-up. All 23 offline unittest cases pass, including the portable C
+control/domain cases and bundle/ownership guards. Sanitized build/device scope
+is recorded in [configs/cpufreq-validation.json](../configs/cpufreq-validation.json).

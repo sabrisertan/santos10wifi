@@ -21,6 +21,7 @@ redistributable root filesystem are not included. Other Tab 3 models are unteste
 | Component | Recorded state |
 |---|---|
 | Kernel | Linux 7.2, bounded HIGHMEM4G, normal boot on the development tablet |
+| CPU frequency | Cloverview SFI driver, one package policy, managed built-in performance at 1.6 GHz; scoped load/recovery tests accepted |
 | Display and touch | 1280×800, private Mutter/GNOME 51 HWC backend; touchscreen input |
 | Graphics | Legacy PowerVR SGX544 GLES2 through libhybris; custom GTK4 SantosGL renderer |
 | Audio | SST/WM8994, PipeWire + WirePlumber, speakers/headphones and volume controls accepted |
@@ -32,12 +33,19 @@ The September 28 read-only check confirmed the running kernel, loaded module
 build IDs, GNOME/audio processes and installed application hashes. It did not
 repeat every hardware test. See [validation](docs/VALIDATION.md) for that boundary.
 
+The October 2 CPUFreq follow-up found a missing SFI frequency driver rather than
+an intrinsic playback limit: a matched 1080p fixture went from 190 sampled VO
+drops at 800 MHz to zero at 1.6 GHz, with maintainer-confirmed smooth video.
+The epochs differed and other playback/thermal/allocator gates remain separate.
+[CPUFreq source, policy and installation boundaries](docs/CPUFREQ.md).
+
 ## Start here
 
 - [Reproducing the port: verified steps and missing inputs](REPRODUCING.md)
 - [Build and source reconstruction](docs/BUILDING.md)
 - [Known bugs and limitations](docs/KNOWN-ISSUES.md)
 - [Architecture and source map](docs/ARCHITECTURE.md)
+- [Cloverview CPUFreq and managed performance](docs/CPUFREQ.md)
 - [Bootloader compatibility and partition migration](docs/BOOT-AND-STORAGE.md)
 - [Device recovery and installation boundary](docs/RECOVERY.md)
 - [Installable-image feasibility and remaining work](docs/IMAGE-RELEASE.md)
@@ -46,13 +54,15 @@ repeat every hardware test. See [validation](docs/VALIDATION.md) for that bounda
 
 The browser experiment uses Firefox ESR 78.15 with its content sandbox disabled.
 It is a compatibility demonstration, unsuitable for sensitive browsing. The
-video candidate still drops frames under load and awaits final physical acceptance.
+embedded-video and long-tail acceptance remains separate from the scoped
+zero-drop 1080p CPUFreq fixture; do not read that result as universal playback
+or fresh-device acceptance.
 
 ## Repository contents
 
 `patches/` contains pinned upstream deltas for Linux, GTK, Mutter, GNOME Shell and
 Pipeline. `kernel/overlay/` contains the active SGX provider source;
-`modules/` contains the VDX engine and DRM shell. `packaging/void/` carries selected
+`modules/` contains the VDX engine, DRM shell, fence core and CPUFreq driver. `packaging/void/` carries selected
 Void recipes. `integration/` preserves the Wayland bridge, session/audio references,
 power policy and Firefox compatibility sources.
 

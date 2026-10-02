@@ -7,6 +7,7 @@ and upstream notices when redistributing or changing it.
 | Component | License reference |
 |---|---|
 | Linux platform changes and VDX | GPL-2.0; see `LICENSES/Linux-COPYING`, `LICENSES/GPL-2.0`, file SPDX identifiers and the upstream Linux license tree |
+| Santos CPUFreq driver, manager and tests | Project-specific GPL-2.0-only; hardware oracle is the Intel/Samsung 3.4 SFI driver, not a redistributed vendor binary |
 | PowerVR Services4 | Original per-file terms, including Dual MIT/GPLv2 notices; retained in the provider sources |
 | GTK | Upstream LGPL terms; `LICENSES/GTK-COPYING` and upstream per-file notices |
 | Mutter | `LICENSES/Mutter-COPYING` and upstream per-file notices |

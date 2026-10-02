@@ -1,0 +1,4 @@
+#!/bin/sh
+set -u
+mkdir -p /var/log/santos-cpufreq
+exec svlogd -tt /var/log/santos-cpufreq

@@ -1,6 +1,6 @@
 # Known bugs and limitations
 
-Snapshot: 2026-09-28. IDs refer to the development project's findings registry.
+Baseline snapshot: 2026-09-28; CPUFreq/port-audit follow-up: 2026-10-02. IDs refer to the development project's findings registry.
 “Accepted” is scoped to the tests performed on one GT-P5210.
 
 | Area / ID | Impact and current boundary |
@@ -11,7 +11,10 @@ Snapshot: 2026-09-28. IDs refer to the development project's findings registry.
 | Memory pressure | September 28 read-only inspection found historical GNOME order-0 allocation warnings in the current boot's log. They do not establish a new root cause; no new stress test was performed. |
 | Session restart / L205–L206 | Earlier service-restart runs presented three frames then stalled. Service restart is not accepted as equivalent to a clean boot. |
 | Video recovery / L188, L197, L220 | Provider/network long-tail recovery, opening-frame corruption and some recovery cover behavior remain incompletely accepted. Recent timing fixes do not close these independent gates. |
-| High resolution / L195 | Real-time 1080p presentation is not accepted. Decoder throughput and presentation cadence are separate limits. |
+| High resolution / L195 | One matched 1080p30 fixture at 1.6 GHz passed 300/300, zero sampled drops and maintainer smoothness; its 800 MHz control had 190 drops on a different boot. No general media/allocator/long-tail acceptance. |
+| CPU frequency / L260, L267 | Missing SFI driver and incorrect split-policy model corrected; managed performance active with real package/load/lease/recovery tests. Final service coldboot, sustained thermal, hotplug/suspend and full installation remain separate. |
+| VDX port / L261–L263 | Completion still uses jiffy polling instead of the 3.4 IRQ path; WAITIDLE has a pre-publication reservation gap; hot-path kernel logging remains active. Latency/counter benefits of fixing these are not yet measured. |
+| Native idle / L268 | Cloverview C-state path is absent from the current config/model support, with no active cpuidle driver/states. Idle-power/thermal effect is a candidate, not a proven FPS cap; fallback idle is not equivalent to a busy-loop. |
 | External player / L246 | Rejected external-player experiment has a crash-budget reset defect. Retained source is experimental; the embedded Pipeline path is the publication baseline. |
 | Renderer retry / L210 | A failed GtkGLArea context cannot be restored by merely clearing player state; widget/context recreation remains a separate gap. |
 | Synchronization / L72 | HWC native-window retire-fence stub remains deferred. No general synchronization-correctness claim. |
